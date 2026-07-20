@@ -1,0 +1,63 @@
+name: Unzip Engine Archive
+
+# This workflow extracts the "Manual-auto-MangaTranslator-main (2).zip" file
+# that's sitting in the root of this repo, and commits the extracted files
+# back into the repo (replacing the zip). After this runs once, the repo
+# will contain the actual MangaTranslator engine source (app.py, core/, etc.)
+# instead of just a zip file - which is what lets raw.githubusercontent.com
+# / git clone serve individual files directly.
+#
+# Run it manually from the Actions tab ("Run workflow" button). It only
+# needs to be run once (or again if you upload a new zip to replace it).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unzip-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Unzip the engine archive
+        run: |
+          set -e
+          ZIP_NAME="Manual-auto-MangaTranslator-main (2).zip"
+
+          if [ ! -f "$ZIP_NAME" ]; then
+            echo "::error::Could not find '$ZIP_NAME' in the repo root. Check the exact filename (spelling/spacing) and update ZIP_NAME in this workflow if it differs."
+            exit 1
+          fi
+
+          unzip -q "$ZIP_NAME" -d _unzipped_tmp
+
+          # The zip contains a single top-level folder (e.g.
+          # "Manual-auto-MangaTranslator-main"). Move its *contents* up into
+          # the repo root, rather than keeping that wrapper folder, so paths
+          # like core/, app.py, requirements.txt sit directly in repo root.
+          INNER_DIR=$(find _unzipped_tmp -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          if [ -z "$INNER_DIR" ]; then
+            echo "::error::Zip did not contain a top-level folder as expected."
+            exit 1
+          fi
+
+          shopt -s dotglob
+          mv "$INNER_DIR"/* .
+          rm -rf _unzipped_tmp
+          rm -f "$ZIP_NAME"
+
+      - name: Commit extracted files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to commit - files may already be extracted."
+          else
+            git commit -m "Extract engine zip into repo root"
+            git push
+          fi
