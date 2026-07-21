@@ -1,7 +1,10 @@
 name: Delete All Files
 
 on:
-  workflow_dispatch: # Actions tab se manually run karne ke liye
+  workflow_dispatch:
+
+permissions:
+  contents: write # Bot ko push permission dene ke liye
 
 jobs:
   delete-everything:
@@ -13,13 +16,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Delete all files except .git and workflow file
+      - name: Delete all files except git folders
         run: |
-          # Sab kuch delete karein sivay .git aur current workflow file ke
           find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.github' -exec rm -rf {} +
-          
-          # Git status check karein
-          git status
 
       - name: Commit and Push Changes
         run: |
@@ -28,7 +27,7 @@ jobs:
           
           git add -A
           if git diff-index --quiet HEAD; then
-            echo "Koyi changes nahi hain delete karne ke liye."
+            echo "No changes to commit."
           else
             git commit -m "Delete all contents via GitHub Actions"
             git push
