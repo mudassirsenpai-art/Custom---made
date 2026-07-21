@@ -101,14 +101,21 @@ def _run_manual_pass1(args, config):
 
         bubbles = []
         for bubble in checkpoint.get("sorted_bubble_data", []):
-            bubbles.append(
-                {
-                    "bubble_id": bubble.get("bubble_id"),
-                    "ocr_text": bubble.get("ocr_text", ""),
-                    "translation": "",
-                    "is_outside_text": bool(bubble.get("is_outside_text", False)),
-                }
-            )
+            is_outside = bool(bubble.get("is_outside_text", False))
+            bubble_entry = {
+                "bubble_id": bubble.get("bubble_id"),
+                "ocr_text": bubble.get("ocr_text", ""),
+                "translation": "",
+                "is_outside_text": is_outside,
+            }
+            # "sfx" is only meaningful for OSB items: the human editor can set
+            # it true to mark a sound effect, which Pass 2 uses to skip
+            # rendering and leave that region's original (already-cleaned)
+            # pixels untouched instead of drawing translated text over it.
+            # Always present (even for bubbles) so the JSON schema is
+            # consistent across all entries; ignored for non-OSB items.
+            bubble_entry["sfx"] = False
+            bubbles.append(bubble_entry)
 
         pages.append(
             {
@@ -224,7 +231,13 @@ def _run_manual_pass2(args, config):
             bubble_id = bubble.get("bubble_id")
             if not bubble_id:
                 continue
-            translations_map[bubble_id] = bubble.get("translation", "")
+            # Each entry carries both the (possibly human-edited) translation
+            # text and the human-editable "sfx" flag. sfx is only honored for
+            # OSB items downstream; for bubbles/captions it is ignored.
+            translations_map[bubble_id] = {
+                "translation": bubble.get("translation", ""),
+                "sfx": bool(bubble.get("sfx", False)),
+            }
 
         out_name = source_file or checkpoint_path.stem
         output_path = output_dir / out_name if output_dir else None
@@ -933,6 +946,17 @@ def main():
         action="store_true",
         help="Group non-solid OSB regions into one expanded Flux mask per page",
     )
+    parser.add_argument(
+        "--osb-no-sfx-skip-inpaint",
+        dest="osb_sfx_skip_inpaint",
+        action="store_false",
+        help=(
+            "Disable SFX skip: by default, OSB text the model tags as a "
+            "sound effect is left untouched (no inpaint, no render). "
+            "Pass this flag to inpaint/translate SFX like any other OSB text."
+        ),
+    )
+    parser.set_defaults(osb_sfx_skip_inpaint=True)
 
     parser.add_argument(
         "--osb-flux-steps",
@@ -1497,6 +1521,7 @@ def main():
             flux_luminance_correction=args.osb_flux_luminance_correction,
             flux_upscale_small_crops=args.osb_flux_upscale_small_crops,
             flux_group_regions=args.osb_flux_group_regions,
+            sfx_skip_inpaint=args.osb_sfx_skip_inpaint,
             flux_residual_diff_threshold=args.osb_flux_residual_threshold,
             osb_confidence=args.osb_confidence,
             seed=args.osb_seed,
