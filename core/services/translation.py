@@ -2,7 +2,7 @@ import base64
 import json
 import re
 from io import BytesIO
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -245,6 +245,7 @@ You must use the following markdown-style markers to convey emphasis:
 - The numbering must correspond to the input image order (1, 2, 3...).
 - For each item, provide both transcription and translation in the format:
   `i: <transcribed text> || <translated {output_language} text>` where `i` is the input image number.
+- **Outside-bubble sound effects (SFX):** For items that are outside-speech-bubble text (OSB) AND are a sound effect (Audible SFX), prefix the translated portion with a `[SFX]` marker, e.g. `i: <transcribed text> || [SFX] <translated {output_language} text>`. Only use this marker for outside-bubble sound effects — never for in-bubble dialogue/narration or for OSB items that are not sound effects (e.g. captions, narration, mimetic FX describing an action).
 - Do not include section headers, explanations, or formatting outside of this list.
 """
     elif mode == "two-step":
@@ -253,6 +254,7 @@ You must use the following markdown-style markers to convey emphasis:
 - You must return your response as a single numbered list with exactly one line per input text.
 - The numbering must correspond to the input order (1, 2, 3...).
 - The format must be `i: <translated {output_language} text>` where `i` is the input text number.
+- **Outside-bubble sound effects (SFX):** For items that are outside-speech-bubble text (OSB) AND are a sound effect (Audible SFX), prefix the translated text with a `[SFX]` marker, e.g. `i: [SFX] <translated {output_language} text>`. Only use this marker for outside-bubble sound effects — never for in-bubble dialogue/narration or for OSB items that are not sound effects (e.g. captions, narration, mimetic FX describing an action).
 - Do not include section headers, explanations, or formatting outside of this list.
 """  # noqa
     else:
@@ -959,6 +961,25 @@ def _parse_llm_response_unified(
             always_print=True,
         )
         return [f"[{provider}: Parse error]"] * total_elements
+
+
+_SFX_MARKER_PATTERN = re.compile(r"^\s*\[SFX\]\s*", re.IGNORECASE)
+
+
+def _strip_sfx_marker(text: str) -> Tuple[str, bool]:
+    """Detect and strip a leading [SFX] marker from translated text.
+
+    Returns a tuple of (clean_text, is_sfx). The marker is stripped from the
+    returned text regardless of the caller's eventual use of the flag —
+    callers that don't apply the flag (e.g. non-OSB items) simply discard it,
+    ensuring a stray/mistaken [SFX] marker is never shown to the user.
+    """
+    if not text:
+        return text, False
+    match = _SFX_MARKER_PATTERN.match(text)
+    if not match:
+        return text, False
+    return text[match.end():].strip(), True
 
 
 def _prepare_images_for_ocr(
@@ -1702,6 +1723,7 @@ def call_translation_api_batch(
     previous_context_images: Optional[List[Dict[str, str]]] = None,
     previous_context_texts: Optional[List[List[str]]] = None,
     ocr_texts_output: Optional[List[str]] = None,
+    sfx_flags_output: Optional[List[bool]] = None,
     debug: bool = False,
 ) -> List[str]:
     """
@@ -1723,6 +1745,9 @@ def call_translation_api_batch(
         ocr_texts_output: Optional mutable list. When provided, OCR transcripts (source-language text) for
             the current page's bubbles are appended in reading order so callers can propagate them as
             previous-page text context for subsequent calls.
+        sfx_flags_output: Optional mutable list. When provided, per-item is_sfx booleans are appended in
+            reading order (True only for OSB items detected as sound effects) so callers can skip OSB
+            inpainting for those regions.
         debug (bool): Whether to print debugging information.
 
     Returns:
@@ -1797,11 +1822,15 @@ def call_translation_api_batch(
         previous_context_images=previous_context_images,
         previous_context_texts=cleaned_previous_texts,
     )
-    cached_translation, cached_ocr_texts = cache.get_translation(cache_key)
+    cached_translation, cached_ocr_texts, cached_sfx_flags = cache.get_translation(
+        cache_key
+    )
     if cached_translation is not None:
         log_message("  - Using cached translation", verbose=debug)
         if ocr_texts_output is not None and cached_ocr_texts is not None:
             ocr_texts_output.extend(cached_ocr_texts)
+        if sfx_flags_output is not None and cached_sfx_flags is not None:
+            sfx_flags_output.extend(cached_sfx_flags)
         return cached_translation
 
     model_name = config.model_name
@@ -2046,9 +2075,12 @@ The target language is {output_language}. Use the appropriate translation approa
                         combined_results.append(f"[{provider}: Translation failed]")
                 if ocr_texts_output is not None:
                     ocr_texts_output.extend(extracted_texts)
+                if sfx_flags_output is not None:
+                    sfx_flags_output.extend([False] * total_elements)
                 return combined_results
 
             combined_results = []
+            sfx_flags = []
             for i in range(total_elements):
                 if i in ocr_failed_indices:
                     if final_translations[i] == "[OCR FAILED]":
@@ -2059,14 +2091,25 @@ The target language is {output_language}. Use the appropriate translation approa
                             verbose=debug,
                         )
                         combined_results.append("[OCR FAILED]")
+                    sfx_flags.append(False)
                 else:
-                    combined_results.append(final_translations[i])
+                    clean_text, marker_found = _strip_sfx_marker(final_translations[i])
+                    # Only OSB items may carry the sfx flag — for bubbles/captions the
+                    # marker is stripped from the displayed text but never sets the flag.
+                    is_osb = (i + 1) in osb_indices
+                    combined_results.append(clean_text)
+                    sfx_flags.append(bool(marker_found and is_osb))
 
             cache.set_translation(
-                cache_key, combined_results, ocr_texts=extracted_texts
+                cache_key,
+                combined_results,
+                ocr_texts=extracted_texts,
+                sfx_flags=sfx_flags,
             )
             if ocr_texts_output is not None:
                 ocr_texts_output.extend(extracted_texts)
+            if sfx_flags_output is not None:
+                sfx_flags_output.extend(sfx_flags)
             return combined_results
 
         elif translation_mode == "one-step":
@@ -2125,20 +2168,33 @@ For each image, you must perform two steps:
 
             translations = []
             ocr_texts = []
-            for line in raw_lines:
+            sfx_flags = []
+            for idx, line in enumerate(raw_lines):
                 if "||" in line:
                     parts = line.split("||", 1)
                     ocr_texts.append(parts[0].strip())
-                    translations.append(parts[1].strip())
+                    translated_text = parts[1].strip()
                 else:
                     # Model violated the format — keep the line as the translation
                     # and mark OCR as failed so it isn't reused as prior context.
                     ocr_texts.append("[OCR FAILED]")
-                    translations.append(line)
+                    translated_text = line
 
-            cache.set_translation(cache_key, translations, ocr_texts=ocr_texts)
+                clean_text, marker_found = _strip_sfx_marker(translated_text)
+                # Only OSB items may carry the sfx flag — for bubbles/captions the
+                # marker is stripped from the displayed text but never sets the flag,
+                # even if the model mistakenly emitted it.
+                is_osb = (idx + 1) in osb_indices
+                translations.append(clean_text)
+                sfx_flags.append(bool(marker_found and is_osb))
+
+            cache.set_translation(
+                cache_key, translations, ocr_texts=ocr_texts, sfx_flags=sfx_flags
+            )
             if ocr_texts_output is not None:
                 ocr_texts_output.extend(ocr_texts)
+            if sfx_flags_output is not None:
+                sfx_flags_output.extend(sfx_flags)
             return translations
         else:
             raise TranslationError(
