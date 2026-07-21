@@ -1464,6 +1464,20 @@ def detect_speech_bubbles(
                         primary_boxes.tolist() if len(primary_boxes) > 0 else []
                     )
 
+                    # A secondary (RT-DETR) box is only a genuinely "missed" bubble
+                    # if it doesn't meaningfully overlap any primary box at all. IoA
+                    # alone can miss this: when the two models draw differently-sized
+                    # boxes for the SAME bubble (e.g. secondary box only ~30-45%
+                    # contained in/around the primary box), neither IoA direction
+                    # crosses IOA_OVERLAP_THRESHOLD, so the secondary box slips through
+                    # as a "new" bubble even though it's really a duplicate. That
+                    # duplicate then gets OCR'd, translated, and rendered a second
+                    # time on top of the original bubble, producing stacked/doubled
+                    # translated text. IoU (intersection over the *union*, not just
+                    # one box) is a more reliable same-bubble signal for this case, so
+                    # check it too and require BOTH IoA checks and IoU to disagree
+                    # with "same bubble" before treating it as newly found.
+                    MISSED_BUBBLE_IOU_THRESHOLD = 0.2
                     for i, s_box in enumerate(secondary_boxes):
                         s_box_list = s_box.tolist()
 
@@ -1472,10 +1486,12 @@ def detect_speech_bubbles(
                         for p_box_list in primary_boxes_list:
                             ioa_s_in_p = _calculate_ioa(s_box_list, p_box_list)
                             ioa_p_in_s = _calculate_ioa(p_box_list, s_box_list)
+                            iou = _calculate_iou(s_box_list, p_box_list)
 
                             if (
                                 ioa_s_in_p > IOA_OVERLAP_THRESHOLD
                                 or ioa_p_in_s > IOA_OVERLAP_THRESHOLD
+                                or iou > MISSED_BUBBLE_IOU_THRESHOLD
                             ):
                                 is_covered = True
                                 break
