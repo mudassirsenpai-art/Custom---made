@@ -184,6 +184,8 @@ def autodetect_yolo_model_path(
     yolo_dir = models_dir / "yolo"
     if bubble_detector_model == "yolo_2":
         return yolo_dir / "manga109-segmentation-bubble.pt"
+    if bubble_detector_model == "yolo_3":
+        return yolo_dir / "comic-speech-bubble-detector.pt"
     return yolo_dir / "yolov8m_seg-speech-bubble.pt"
 
 
@@ -202,7 +204,7 @@ def validate_core_inputs(
         rendering_cfg (RenderingConfig): Rendering configuration.
         models_dir (Path): Absolute path to the directory containing YOLO models.
         fonts_base_dir (Path): Absolute path to the base directory containing font packs.
-        bubble_detector_model (str): Which bubble detector to use ("yolo_1" or "yolo_2").
+        bubble_detector_model (str): Which bubble detector to use ("yolo_1", "yolo_2", or "yolo_3").
 
     Returns:
         tuple[Path, Path]: Validated absolute path to the YOLO model and font directory.
