@@ -159,6 +159,10 @@ class OutsideTextConfig:
     text_box_proximity_ratio: float = 0.02  # 2% of image dimension
     flux_guidance_scale: float = 2.5
     flux_prompt: str = "Remove all text."
+    # When True, OSB regions the LLM tags as sound-effect (SFX) text are left
+    # completely untouched: no inpainting, no rendering. Only applies to
+    # outside-bubble (OSB) text; speech bubbles and captions are never skipped.
+    sfx_skip_inpaint: bool = True
 
 
 @dataclass
