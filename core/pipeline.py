@@ -2202,6 +2202,27 @@ def translate_and_render(
                             continue
 
                         if is_outside_text:
+                            if bubble.get("is_sfx", False) and "original_crop_pil" in bubble:
+                                # SFX-flagged OSB item: skip rendering entirely and
+                                # leave the original (never-inpainted, thanks to
+                                # drop_sfx_skip_regions) pixels untouched. This is
+                                # the render-side half of the SFX-skip feature -
+                                # drop_sfx_skip_regions() only prevents the inpaint;
+                                # this prevents drawing translated text on top of
+                                # those same original pixels.
+                                log_message(
+                                    "Restoring original OSB patch - SFX-flagged, "
+                                    f"skipping render for {bbox}",
+                                    verbose=verbose,
+                                    always_print=True,
+                                )
+                                rendered_image = pil_cleaned_image.copy()
+                                original_patch = bubble["original_crop_pil"]
+                                rendered_image.paste(original_patch, (bbox[0], bbox[1]))
+                                pil_cleaned_image = rendered_image
+                                final_image_to_save = pil_cleaned_image
+                                continue
+
                             ocr_text = (bubble.get("ocr_text") or "").strip()
                             if (
                                 ocr_text
