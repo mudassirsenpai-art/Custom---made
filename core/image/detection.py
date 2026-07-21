@@ -1291,6 +1291,9 @@ def detect_speech_bubbles(
         conjoined_confidence (float): Confidence threshold for secondary RT-DETR model (conjoined bubble detection)
         osb_text_verification (bool): When True, expand bubble boxes to fully cover OSB text detections
         osb_text_hf_token (str): Optional token for gated model downloads (SAM3, OSB text)
+        bubble_detector_model (str): Which primary bubble detector to use
+            ("yolo_1", "yolo_2", or "yolo_3"). Controls both model weights and
+            inference image size (yolo_2 -> 1600, yolo_3 -> 1024, else 640).
 
     Returns:
         tuple[list, list]: (speech bubble detections, text_free boxes from secondary model)
@@ -1334,7 +1337,12 @@ def detect_speech_bubbles(
         log_message("Using cached YOLO detections", verbose=verbose)
         primary_results, primary_boxes = cached_yolo
     else:
-        primary_imgsz = 1600 if bubble_detector_model == "yolo_2" else 640
+        if bubble_detector_model == "yolo_2":
+            primary_imgsz = 1600
+        elif bubble_detector_model == "yolo_3":
+            primary_imgsz = 1024
+        else:
+            primary_imgsz = 640
         primary_results = primary_model(
             image_cv,
             conf=confidence,
