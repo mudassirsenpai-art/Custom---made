@@ -1305,10 +1305,21 @@ def translate_and_render(
         if config.detection.use_panel_sorting:
             panels = debug_panels
 
-    # Process outside text (detect always; optionally defer inpainting for LLM overlap)
+    # Process outside text (detect always; defer inpainting whenever OSB
+    # SFX-skip is enabled OR the user asked for LLM/inpaint overlap - both
+    # need the model's is_sfx flags, which only exist after translation runs,
+    # so inpainting must happen after translation rather than before/during
+    # it. Only when neither applies do we take the eager (detect+inpaint
+    # immediately) path.
+    sfx_skip_inpaint_enabled = bool(
+        getattr(config.outside_text, "sfx_skip_inpaint", True)
+    )
     use_llm_inpaint_overlap = _should_overlap_llm_with_inpaint(config)
+    defer_osb_inpaint = (
+        use_llm_inpaint_overlap or sfx_skip_inpaint_enabled
+    ) and not config.cleaning_only and not getattr(config, "test_mode", False)
     outside_work = None
-    if use_llm_inpaint_overlap:
+    if defer_osb_inpaint:
         outside_work = prepare_outside_text_work(
             pil_image_processed,
             config,
@@ -1630,7 +1641,7 @@ def translate_and_render(
                         always_print=True,
                     )
                     return pil_cleaned_image
-                if use_llm_inpaint_overlap and (
+                if defer_osb_inpaint and (
                     outside_work is not None or bubble_data
                 ):
                     page_image = pil_image_processed
@@ -1951,7 +1962,7 @@ def translate_and_render(
 
                 if not bubble_images_b64:
                     log_message("No valid bubbles after sorting", always_print=True)
-                    if use_llm_inpaint_overlap:
+                    if defer_osb_inpaint:
                         (
                             pil_image_processed,
                             outside_text_data,
@@ -1976,7 +1987,7 @@ def translate_and_render(
                             osb_outline_width=osb_outline_width,
                             verbose=verbose,
                         )
-                    elif use_llm_inpaint_overlap:
+                    elif defer_osb_inpaint:
                         # Translation now runs BEFORE OSB inpaint (sequential, not
                         # concurrent): the model's per-item is_sfx flags must be
                         # known and attached before finish_outside_text_work() runs,
