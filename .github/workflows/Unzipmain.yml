@@ -3,8 +3,12 @@ name: Unzip File in Repository
 on:
   push:
     branches:
-      - main  # Jab main branch par push hoga tab chalega
-  workflow_dispatch: # Direct manually run karne ke liye bhi option rahega
+      - main
+  workflow_dispatch:
+
+# Bot ko write access dene ke liye yeh block zaroori hai
+permissions:
+  contents: write
 
 jobs:
   unzip-and-commit:
@@ -16,8 +20,6 @@ jobs:
 
       - name: Unzip file
         run: |
-          # Zip file ko current directory (. -d .) ma extract karega
-          # Agar kisi specific folder ma unzip karna ho to -d ./my-folder likhein
           unzip -o Custom---made-main.zip -d .
 
       - name: Commit and push unzipped files
@@ -27,7 +29,6 @@ jobs:
           
           git add .
           
-          # Check agar koi naye files hain tabhi commit karega
           if git status --porcelain | grep -q .; then
             git commit -m "Automated: Unzipped Custom---made-main.zip"
             git push
