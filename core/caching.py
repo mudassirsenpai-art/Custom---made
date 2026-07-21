@@ -294,32 +294,37 @@ class UnifiedCache:
 
     def get_translation(
         self, cache_key: Optional[str]
-    ) -> "tuple[Optional[list], Optional[list]]":
+    ) -> "tuple[Optional[list], Optional[list], Optional[list]]":
         """Get cached translation results.
 
         Args:
             cache_key: Cache key (can be None if not deterministic)
 
         Returns:
-            (translations, ocr_texts) tuple. ocr_texts may be None for legacy
-            cache entries that predate OCR-text caching.
+            (translations, ocr_texts, sfx_flags) tuple. ocr_texts/sfx_flags may be
+            None for legacy cache entries that predate OCR-text/SFX-flag caching.
         """
         if cache_key is None:
-            return None, None
+            return None, None, None
         with self._lock:
             entry = self._translation_cache.get(cache_key)
         if entry is None:
-            return None, None
+            return None, None, None
         # Back-compat: pre-existing entries are bare translation lists
         if isinstance(entry, dict):
-            return entry.get("translations"), entry.get("ocr_texts")
-        return entry, None
+            return (
+                entry.get("translations"),
+                entry.get("ocr_texts"),
+                entry.get("sfx_flags"),
+            )
+        return entry, None, None
 
     def set_translation(
         self,
         cache_key: Optional[str],
         translations: list,
         ocr_texts: Optional[list] = None,
+        sfx_flags: Optional[list] = None,
         verbose: bool = False,
     ) -> None:
         """Cache translation results.
@@ -328,11 +333,16 @@ class UnifiedCache:
             cache_key: Cache key (can be None if not deterministic)
             translations: Translation results to cache
             ocr_texts: Optional source-language OCR transcripts captured alongside the translations
+            sfx_flags: Optional per-item is_sfx booleans (OSB sound-effect skip-inpaint flag)
             verbose: Whether to print verbose logging
         """
         if cache_key is None:
             return
-        entry = {"translations": translations, "ocr_texts": ocr_texts}
+        entry = {
+            "translations": translations,
+            "ocr_texts": ocr_texts,
+            "sfx_flags": sfx_flags,
+        }
         with self._lock:
             self._translation_cache.put(cache_key, entry)
         log_message(
