@@ -198,6 +198,7 @@ class OutsideTextDetector:
         text_free_boxes: Optional[List] = None,
         bubble_detector_model: str = "yolo_2",
         min_area_ignore_ratio: float = 0.0,
+        osb_model_variant: str = "manga",
     ):
         """Detect non-dialogue text by subtracting YOLO speech bubbles from OCR results.
 
@@ -208,6 +209,8 @@ class OutsideTextDetector:
             conjoined_confidence: Confidence threshold for secondary RT-DETR model (conjoined bubble detection).
             verbose: If True, logs intermediate steps.
             text_free_boxes: Optional list of text_free regions to use as fallback OSB detections.
+            osb_model_variant: "manga" (default) uses the standard OSB text model;
+                "webtoon" uses a model tuned for long-strip manhwa/webtoon captions.
 
         Returns:
             list: Detected regions outside bubbles as (bbox, confidence).
@@ -372,10 +375,16 @@ class OutsideTextDetector:
 
         log_message("Running YOLO OSB Text...", always_print=True)
 
+        osb_model_type = (
+            ModelType.YOLO_OSBTEXT_WEBTOON
+            if osb_model_variant == "webtoon"
+            else ModelType.YOLO_OSBTEXT
+        )
+
         osbtext_boxes = None
         osbtext_confs = None
         try:
-            osbtext_model_path = str(self.manager.model_paths[ModelType.YOLO_OSBTEXT])
+            osbtext_model_path = str(self.manager.model_paths[osb_model_type])
             osbtext_cache_key = self.cache.get_yolo_cache_key(
                 image_pil, osbtext_model_path, confidence
             )
@@ -386,7 +395,12 @@ class OutsideTextDetector:
                 log_message("Using cached OSBText detections", verbose=verbose)
                 osbtext_results, osbtext_boxes, osbtext_confs = cached_osbtext
             else:
-                osbtext_model = self.manager.load_yolo_osbtext(token=self.hf_token)
+                if osb_model_type == ModelType.YOLO_OSBTEXT_WEBTOON:
+                    osbtext_model = self.manager.load_yolo_osbtext_webtoon(
+                        token=self.hf_token
+                    )
+                else:
+                    osbtext_model = self.manager.load_yolo_osbtext(token=self.hf_token)
                 osbtext_results = osbtext_model(
                     image_cv,
                     conf=confidence,
