@@ -45,6 +45,7 @@ from .image.image_utils import (
 from .image.sorting import sort_bubbles_by_reading_order, sort_panels_by_reading_order
 from .ml.model_manager import get_model_manager
 from .outside_text_processor import (
+    drop_sfx_skip_regions,
     finish_outside_text_work,
     prepare_outside_text_work,
     process_outside_text,
@@ -223,7 +224,7 @@ def load_manual_checkpoint(checkpoint_path: Union[str, Path]) -> Dict[str, Any]:
 
 def _render_from_manual_checkpoint(
     checkpoint_path: Union[str, Path],
-    manual_translations: Dict[str, str],
+    manual_translations: Dict[str, Any],
     *,
     output_path: Optional[Union[str, Path]],
     config: MangaTranslatorConfig,
@@ -301,7 +302,19 @@ def _render_from_manual_checkpoint(
         bubble_id = bubble.get("bubble_id") or compute_bubble_id(bbox, is_outside_text)
         ocr_text = (bubble.get("ocr_text") or "").strip()
 
-        text = (manual_translations.get(bubble_id) or "").strip()
+        # manual_translations entries may be a plain translated-text string
+        # (legacy shape) or a {"translation": str, "sfx": bool} dict written
+        # by Manual Pass 1/2's combined_translations.json. "sfx" is only
+        # meaningful for OSB items - a human editor marking a sound effect so
+        # Pass 2 leaves its original pixels untouched instead of rendering
+        # translated text over it.
+        raw_entry = manual_translations.get(bubble_id)
+        if isinstance(raw_entry, dict):
+            text = (raw_entry.get("translation") or "").strip()
+            is_sfx = bool(raw_entry.get("sfx", False)) and is_outside_text
+        else:
+            text = (raw_entry or "").strip()
+            is_sfx = False
         if not text:
             # Fall back to the original OCR text so the page still renders in
             # full even if this bubble's translation is missing/unmatched.
@@ -315,6 +328,7 @@ def _render_from_manual_checkpoint(
             )
             continue
         bubble["translation"] = text
+        bubble["is_sfx"] = is_sfx
 
         render_info = None
         base_mask = None
@@ -322,6 +336,15 @@ def _render_from_manual_checkpoint(
         text_bg_rgb = None
 
         if is_outside_text:
+            if is_sfx and "original_crop_pil" in bubble:
+                # Human-flagged SFX: skip rendering entirely, leave the
+                # original (already-cleaned-in-Pass-1) pixels untouched.
+                rendered_image = pil_cleaned_image.copy()
+                original_patch = bubble["original_crop_pil"]
+                rendered_image.paste(original_patch, (bbox[0], bbox[1]))
+                pil_cleaned_image = rendered_image
+                final_image_to_save = pil_cleaned_image
+                continue
             if ocr_text and ocr_text == text and "original_crop_pil" in bubble:
                 rendered_image = pil_cleaned_image.copy()
                 original_patch = bubble["original_crop_pil"]
@@ -1065,7 +1088,7 @@ def translate_and_render(
     ocr_texts_out: Optional[List[str]] = None,
     manual_checkpoint_save_path: Optional[Union[str, Path]] = None,
     manual_checkpoint_load_path: Optional[Union[str, Path]] = None,
-    manual_translations: Optional[Dict[str, str]] = None,
+    manual_translations: Optional[Dict[str, Any]] = None,
 ):
     """
     Main function to translate manga speech bubbles and render translations using a config object.
@@ -1092,10 +1115,14 @@ def translate_and_render(
             manual_checkpoint_save_path is loaded from this path and rendering resumes directly
             from it using `manual_translations`. All other args except `output_path` and
             `manual_translations` are ignored in this mode.
-        manual_translations: Manual translation mode, Pass 2. Mapping of bubble_id -> translated
-            text (see compute_bubble_id / the "bubble_id" field written into each checkpoint
-            bubble entry). A bubble whose id is missing or has empty text falls back to that
-            bubble's captured OCR text (untranslated) so the page still renders in full.
+        manual_translations: Manual translation mode, Pass 2. Mapping of bubble_id -> either a
+            plain translated-text string, or a dict {"translation": str, "sfx": bool} (see
+            compute_bubble_id / the "bubble_id" field written into each checkpoint bubble entry).
+            "sfx" is only honored for OSB items: when true, rendering is skipped for that item and
+            its original (already-cleaned) pixels are left untouched, mirroring the automatic
+            [SFX]-marker skip-inpaint behavior from the non-manual translation flow. A bubble whose
+            id is missing or has empty text falls back to that bubble's captured OCR text
+            (untranslated) so the page still renders in full.
 
     Returns:
         PIL.Image: Final translated image
@@ -1843,6 +1870,7 @@ def translate_and_render(
 
                 translated_texts = []
                 current_ocr_texts: List[str] = []
+                current_sfx_flags: List[bool] = []
                 _provider_tag = f"[{config.translation.provider}:"
 
                 def _run_deferred_inpaint_and_clean():
@@ -1867,8 +1895,9 @@ def translate_and_render(
                         cleaned_cv = fallback_cv
                     return page_image, osb_data, cleaned_cv, clean_info
 
-                def _run_llm_translation() -> Tuple[List[str], List[str]]:
+                def _run_llm_translation() -> Tuple[List[str], List[str], List[bool]]:
                     ocr_texts: List[str] = []
+                    sfx_flags: List[bool] = []
                     if previous_context_texts_provider is not None:
                         resolved_previous_texts = (
                             previous_context_texts_provider() or []
@@ -1915,9 +1944,10 @@ def translate_and_render(
                         previous_context_images=previous_context_images,
                         previous_context_texts=resolved_previous_texts,
                         ocr_texts_output=ocr_texts,
+                        sfx_flags_output=sfx_flags,
                         debug=verbose,
                     )
-                    return texts, ocr_texts
+                    return texts, ocr_texts, sfx_flags
 
                 if not bubble_images_b64:
                     log_message("No valid bubbles after sorting", always_print=True)
@@ -1947,72 +1977,54 @@ def translate_and_render(
                             verbose=verbose,
                         )
                     elif use_llm_inpaint_overlap:
+                        # Translation now runs BEFORE OSB inpaint (sequential, not
+                        # concurrent): the model's per-item is_sfx flags must be
+                        # known and attached before finish_outside_text_work() runs,
+                        # so SFX-flagged OSB regions can be dropped from inpaint and
+                        # rendering. This trades the previous overlap speedup
+                        # (inpaint and translation used to run in parallel) for
+                        # correctness of the SFX-skip feature; only pages with OSB
+                        # text detected are affected.
                         log_message(
-                            "Running LLM translation concurrently with inpainting",
+                            "Running LLM translation before OSB inpaint "
+                            "(sequential; required for SFX-skip)",
                             always_print=True,
                         )
-                        with ThreadPoolExecutor(max_workers=2) as overlap_executor:
-                            inpaint_future = overlap_executor.submit(
-                                _run_deferred_inpaint_and_clean
+                        try:
+                            translated_texts, current_ocr_texts, current_sfx_flags = (
+                                _run_llm_translation()
                             )
-                            translate_future = overlap_executor.submit(
-                                _run_llm_translation
+                            if current_ocr_texts and ocr_texts_out is not None:
+                                ocr_texts_out.extend(current_ocr_texts)
+                        except TranslationError as e:
+                            error_str = str(e).lower()
+                            critical_tokens = (
+                                "429",
+                                "rate limit",
+                                "rate-limit",
+                                "auth",
+                                "unauthorized",
+                                "forbidden",
+                                "payment",
+                                "quota",
+                                "empty response",
+                                "api failed",
                             )
-                            try:
-                                (
-                                    pil_image_processed,
-                                    outside_text_data,
-                                    cleaned_image_cv,
-                                    processed_bubbles_info,
-                                ) = inpaint_future.result()
-                            except Exception:
-                                translate_future.cancel()
+                            if any(token in error_str for token in critical_tokens):
                                 raise
 
-                            pil_cleaned_image = cv2_to_pil(cleaned_image_cv)
-                            if pil_cleaned_image.mode != target_mode:
-                                pil_cleaned_image = pil_cleaned_image.convert(
-                                    target_mode
-                                )
-                            final_image_to_save = pil_cleaned_image
-
-                            try:
-                                translated_texts, current_ocr_texts = (
-                                    translate_future.result()
-                                )
-                                if current_ocr_texts and ocr_texts_out is not None:
-                                    ocr_texts_out.extend(current_ocr_texts)
-                            except TranslationError as e:
-                                error_str = str(e).lower()
-                                critical_tokens = (
-                                    "429",
-                                    "rate limit",
-                                    "rate-limit",
-                                    "auth",
-                                    "unauthorized",
-                                    "forbidden",
-                                    "payment",
-                                    "quota",
-                                    "empty response",
-                                    "api failed",
-                                )
-                                if any(token in error_str for token in critical_tokens):
-                                    raise
-
-                                log_message(
-                                    f"Translation failed: {e}", always_print=True
-                                )
-                                translated_texts = [f"[Translation Error: {e}]"] * len(
-                                    bubble_images_b64
-                                )
-                            except Exception as e:
-                                log_message(
-                                    f"Translation API error: {e}", always_print=True
-                                )
-                                translated_texts = [
-                                    "[Translation Error: API call raised exception]"
-                                    for _ in sorted_bubble_data
-                                ]
+                            log_message(f"Translation failed: {e}", always_print=True)
+                            translated_texts = [f"[Translation Error: {e}]"] * len(
+                                bubble_images_b64
+                            )
+                        except Exception as e:
+                            log_message(
+                                f"Translation API error: {e}", always_print=True
+                            )
+                            translated_texts = [
+                                "[Translation Error: API call raised exception]"
+                                for _ in sorted_bubble_data
+                            ]
 
                         valid_translations = [
                             t
@@ -2030,9 +2042,44 @@ def translate_and_render(
 
                         if bubble_images_b64 and not valid_translations:
                             raise TranslationError("All bubbles failed.")
+
+                        # Attach is_sfx to each sorted item (OSB items get the
+                        # model-derived flag; bubbles are always False regardless
+                        # of what parsing returned) so drop_sfx_skip_regions() can
+                        # see it via the shared outside_text_data dict objects.
+                        sfx_skip_enabled = getattr(
+                            config.outside_text, "sfx_skip_inpaint", True
+                        )
+                        if len(current_sfx_flags) == len(sorted_bubble_data):
+                            for bubble, is_sfx in zip(
+                                sorted_bubble_data, current_sfx_flags
+                            ):
+                                bubble["is_sfx"] = bool(is_sfx) and bool(
+                                    bubble.get("is_outside_text", False)
+                                )
+                        else:
+                            for bubble in sorted_bubble_data:
+                                bubble["is_sfx"] = False
+
+                        if sfx_skip_enabled and outside_work is not None:
+                            drop_sfx_skip_regions(outside_work, verbose=verbose)
+
+                        (
+                            pil_image_processed,
+                            outside_text_data,
+                            cleaned_image_cv,
+                            processed_bubbles_info,
+                        ) = _run_deferred_inpaint_and_clean()
+
+                        pil_cleaned_image = cv2_to_pil(cleaned_image_cv)
+                        if pil_cleaned_image.mode != target_mode:
+                            pil_cleaned_image = pil_cleaned_image.convert(target_mode)
+                        final_image_to_save = pil_cleaned_image
                     else:
                         try:
-                            translated_texts, current_ocr_texts = _run_llm_translation()
+                            translated_texts, current_ocr_texts, current_sfx_flags = (
+                                _run_llm_translation()
+                            )
                             if current_ocr_texts and ocr_texts_out is not None:
                                 ocr_texts_out.extend(current_ocr_texts)
                         except TranslationError as e:
@@ -2093,6 +2140,14 @@ def translate_and_render(
                             "OCR/translation count mismatch; OSB unchanged-text restore disabled",
                             verbose=verbose,
                         )
+
+                # Non-overlap path (OSB already inpainted before translation) and
+                # test-mode placeholders never attach is_sfx above; default it here
+                # so downstream consumers (Manual JSON checkpoint, UI) can always
+                # rely on the key being present. Bubbles are always False.
+                for bubble in sorted_bubble_data:
+                    if "is_sfx" not in bubble:
+                        bubble["is_sfx"] = False
 
                 # Render Translations
                 bubble_render_info_map = {
