@@ -21,3 +21,9 @@ transformers>=5.0.0
 uharfbuzz>=0.48.0
 ultralytics>=8.3.94
 paddleocr>=3.0.0  # >=3.0.0 required for PP-OCRv5 (paddleocr-classic-v5 method); PP-OCRv4 (paddleocr-classic) also works fine on this version
+# PIN: paddlepaddle 3.3.0 has a CPU/oneDNN regression - predict() raises
+# "NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support
+# [pir::ArrayAttribute<pir::DoubleAttribute>]" for every image (confirmed
+# upstream: PaddlePaddle/Paddle#77340). 3.2.2 is the last known-good release;
+# unpin only once that issue is fixed upstream.
+paddlepaddle==3.2.2
