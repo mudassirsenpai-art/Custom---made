@@ -1827,6 +1827,28 @@ def translate_and_render(
                     # API call), then checkpoint everything Pass 2 needs and stop
                     # before rendering. Detection/cleaning above already ran once;
                     # this is the only extra network call this pass makes.
+                    #
+                    # OSB inpainting is normally deferred until after translation
+                    # (so the LLM's per-item is_sfx flags can exclude SFX regions
+                    # from cleaning). Manual Pass 1 never translates, so it has no
+                    # is_sfx flags yet - inpaint every OSB region now instead of
+                    # leaving the original (un-inpainted) text in the checkpoint
+                    # image, which would otherwise show through underneath the
+                    # translated text Pass 2 renders on top of it. Pass 2 can
+                    # still honor a human "sfx" flag from the edited JSON by
+                    # pasting back original_crop_pil (captured pre-inpaint,
+                    # before this call), so marking something SFX in the JSON
+                    # still restores the original pixels correctly.
+                    if outside_work is not None:
+                        pil_image_processed, outside_text_data = (
+                            finish_outside_text_work(outside_work)
+                        )
+                        outside_work = None
+                        pil_cleaned_image = pil_image_processed
+                        if pil_cleaned_image.mode != target_mode:
+                            pil_cleaned_image = pil_cleaned_image.convert(target_mode)
+                        final_image_to_save = pil_cleaned_image
+
                     manual_ocr_texts: List[str] = []
                     if bubble_images_b64:
                         try:
