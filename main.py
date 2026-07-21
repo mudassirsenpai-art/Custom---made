@@ -501,9 +501,13 @@ def main():
         "--bubble-detector-model",
         dest="bubble_detector_model",
         type=str,
-        choices=["yolo_1", "yolo_2"],
+        choices=["yolo_1", "yolo_2", "yolo_3"],
         default="yolo_2",
-        help="Primary bubble detector model",
+        help=(
+            "Primary bubble detector model. yolo_1/yolo_2 are manga-trained; "
+            "yolo_3 is trained on manga, webtoon, manhua, and western comics "
+            "(best for manhwa/manhua)."
+        ),
     )
     parser.add_argument(
         "--reading-direction",
