@@ -143,6 +143,7 @@ class OutsideTextConfig:
     flux_group_regions: bool = False
     flux_residual_diff_threshold: float = 0.15
     osb_confidence: float = 0.6
+    osb_model_variant: str = "manga"  # "manga" (default, deepghs YOLOv12) or "webtoon" (ogkalu YOLOv8, tuned for long-strip manhwa)
     osb_font_dir: Optional[str] = None  # None = use main font as fallback
     osb_max_font_size: int = 64
     osb_min_font_size: int = 10
