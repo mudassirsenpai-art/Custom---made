@@ -1839,7 +1839,47 @@ def translate_and_render(
                     # pasting back original_crop_pil (captured pre-inpaint,
                     # before this call), so marking something SFX in the JSON
                     # still restores the original pixels correctly.
-                    if outside_work is not None:
+                    if use_llm_inpaint_overlap:
+                        # Speech-bubble cleaning was deferred earlier (see
+                        # `if not use_llm_inpaint_overlap:` above) so it could run
+                        # concurrently with the LLM translation call. Manual mode
+                        # never makes that translation call, so nothing has resolved
+                        # the deferral yet - pil_cleaned_image is still the raw,
+                        # uncleaned page here. Run the deferred inpaint/clean now,
+                        # otherwise the checkpoint (and Pass 2's render) end up with
+                        # the original untranslated text still under the bubbles.
+                        page_image = pil_image_processed
+                        osb_data = outside_text_data
+                        if outside_work is not None:
+                            page_image, osb_data = finish_outside_text_work(
+                                outside_work
+                            )
+                        fallback_cv = pil_to_cv2(page_image)
+                        if bubble_data:
+                            log_message(
+                                "Cleaning speech bubbles...", verbose=verbose
+                            )
+                            cleaned_image_cv, processed_bubbles_info = (
+                                _clean_speech_bubbles_for_page(
+                                    page_image,
+                                    bubble_data,
+                                    config,
+                                    device,
+                                    processing_scale,
+                                    verbose,
+                                    fallback_cv,
+                                )
+                            )
+                        else:
+                            cleaned_image_cv = fallback_cv
+                        pil_image_processed = page_image
+                        outside_text_data = osb_data
+                        outside_work = None
+                        pil_cleaned_image = cv2_to_pil(cleaned_image_cv)
+                        if pil_cleaned_image.mode != target_mode:
+                            pil_cleaned_image = pil_cleaned_image.convert(target_mode)
+                        final_image_to_save = pil_cleaned_image
+                    elif outside_work is not None:
                         pil_image_processed, outside_text_data = (
                             finish_outside_text_work(outside_work)
                         )
