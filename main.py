@@ -1078,6 +1078,16 @@ def main():
         help="Confidence threshold for OSB text detection (0.0-1.0)",
     )
     parser.add_argument(
+        "--osb-model-variant",
+        choices=["manga", "webtoon"],
+        default="manga",
+        help=(
+            "OSB text detection model to use. 'manga' (default) is the standard "
+            "model. 'webtoon' uses a model tuned for long-strip manhwa/webtoon "
+            "captions and extreme aspect ratios."
+        ),
+    )
+    parser.add_argument(
         "--osb-filter-page-numbers",
         action="store_true",
         help=(
@@ -1524,6 +1534,7 @@ def main():
             sfx_skip_inpaint=args.osb_sfx_skip_inpaint,
             flux_residual_diff_threshold=args.osb_flux_residual_threshold,
             osb_confidence=args.osb_confidence,
+            osb_model_variant=args.osb_model_variant,
             seed=args.osb_seed,
             osb_font_dir=args.osb_font_dir,
             osb_max_font_size=args.osb_max_font_size,
