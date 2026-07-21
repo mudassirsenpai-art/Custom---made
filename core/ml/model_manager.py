@@ -37,6 +37,7 @@ class ModelType(Enum):
     YOLO_SPEECH_BUBBLE_2 = "yolo_speech_bubble_2"
     RTDETR_CONJOINED_BUBBLE = "rtdetr_conjoined_bubble"
     YOLO_OSBTEXT = "yolo_osbtext"
+    YOLO_OSBTEXT_WEBTOON = "yolo_osbtext_webtoon"
     YOLO_PANEL = "yolo_panel"
     SAM2 = "sam2"
     SAM3 = "sam3"
@@ -130,6 +131,9 @@ class ModelManager:
                 model_dir / "rtdetr" / "comic-text-and-bubble-detector"
             ),
             ModelType.YOLO_OSBTEXT: (model_dir / "yolo" / "animetext_yolov12x.pt"),
+            ModelType.YOLO_OSBTEXT_WEBTOON: (
+                model_dir / "yolo" / "comic-text-segmenter-yolov8m.pt"
+            ),
             ModelType.YOLO_PANEL: (
                 model_dir / "yolo" / "manga109_v2023.12.07_l_yolov11.pt"
             ),
@@ -197,6 +201,10 @@ class ModelManager:
             ModelType.YOLO_OSBTEXT: {
                 "repo_id": "deepghs/AnimeText_yolo",
                 "filename": "yolo12x_animetext/model.pt",
+            },
+            ModelType.YOLO_OSBTEXT_WEBTOON: {
+                "repo_id": "ogkalu/comic-text-segmenter-yolov8m",
+                "filename": "comic-text-segmenter.pt",
             },
             ModelType.YOLO_PANEL: {
                 "repo_id": "deepghs/manga109_yolo",
@@ -807,6 +815,37 @@ class ModelManager:
             model = YOLO(str(path))
             self.models[ModelType.YOLO_OSBTEXT] = model
             log_message("YOLO OSB Text model loaded.", verbose=verbose)
+            return model
+
+    def load_yolo_osbtext_webtoon(self, token: Optional[str] = None, verbose: bool = False):
+        """Load YOLO model for outside text detection, tuned for webtoon/manhwa layouts.
+
+        Args:
+            token: Hugging Face token for gated repo access.
+            verbose: Whether to print verbose logging
+        """
+        with self._lock:
+            if self.is_loaded(ModelType.YOLO_OSBTEXT_WEBTOON):
+                return self.models[ModelType.YOLO_OSBTEXT_WEBTOON]
+
+            log_message(
+                "Loading YOLO OSB Text (webtoon) detection model...", verbose=verbose
+            )
+
+            path = self.model_paths[ModelType.YOLO_OSBTEXT_WEBTOON]
+            hf_info = self.model_hf_repos[ModelType.YOLO_OSBTEXT_WEBTOON]
+
+            self._ensure_hf_file(
+                hf_info["repo_id"],
+                hf_info["filename"],
+                path,
+                token=token,
+                verbose=verbose,
+            )
+
+            model = YOLO(str(path))
+            self.models[ModelType.YOLO_OSBTEXT_WEBTOON] = model
+            log_message("YOLO OSB Text (webtoon) model loaded.", verbose=verbose)
             return model
 
     def load_yolo_panel(self, verbose: bool = False):
@@ -1566,6 +1605,8 @@ class ModelManager:
             models_unloaded.append("sam3")
         if self.is_loaded(ModelType.YOLO_OSBTEXT):
             models_unloaded.append("yolo_osbtext")
+        if self.is_loaded(ModelType.YOLO_OSBTEXT_WEBTOON):
+            models_unloaded.append("yolo_osbtext_webtoon")
         if self.is_loaded(ModelType.YOLO_PANEL):
             models_unloaded.append("yolo_panel")
         if self.is_loaded(ModelType.MANGA_OCR):
@@ -1589,6 +1630,9 @@ class ModelManager:
         self.unload_model(ModelType.SAM2, force_gc=False, verbose=verbose)
         self.unload_model(ModelType.SAM3, force_gc=False, verbose=verbose)
         self.unload_model(ModelType.YOLO_OSBTEXT, force_gc=False, verbose=verbose)
+        self.unload_model(
+            ModelType.YOLO_OSBTEXT_WEBTOON, force_gc=False, verbose=verbose
+        )
         self.unload_model(ModelType.YOLO_PANEL, force_gc=False, verbose=verbose)
         self.unload_model(ModelType.MANGA_OCR, force_gc=True, verbose=verbose)
         self.unload_model(ModelType.PADDLE_OCR_VL, force_gc=True, verbose=verbose)
