@@ -583,12 +583,17 @@ def create_layout(
                         ) as group_detection:
                             gr.Markdown("### Speech Bubble Detection")
                             bubble_detector_model = gr.Radio(
-                                choices=["yolo_1", "yolo_2"],
+                                choices=["yolo_1", "yolo_2", "yolo_3"],
                                 value=saved_settings.get(
                                     "bubble_detector_model", "yolo_2"
                                 ),
                                 label="Bubble Detector Model",
-                                info=("Primary YOLO model for bubble detection."),
+                                info=(
+                                    "Primary YOLO model for bubble detection. "
+                                    "yolo_1/yolo_2: manga-trained. "
+                                    "yolo_3: trained on manga, webtoon, manhua, "
+                                    "and western comics - best for manhwa/manhua."
+                                ),
                             )
                             confidence = gr.Slider(
                                 0.1,
