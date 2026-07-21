@@ -244,6 +244,7 @@ def prepare_outside_text_work(
             text_free_boxes=text_free_boxes,
             bubble_detector_model=config.detection.bubble_detector_model,
             min_area_ignore_ratio=config.outside_text.min_area_ignore_ratio,
+            osb_model_variant=getattr(config.outside_text, "osb_model_variant", "manga"),
         )
 
         if not outside_text_results:
