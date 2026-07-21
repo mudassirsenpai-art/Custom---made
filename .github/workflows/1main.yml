@@ -1,0 +1,44 @@
+name: Unzip File in Repository
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unzip-and-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Unzip and Move Files
+        run: |
+          # 1. Zip file ko extract karein
+          unzip -o Custom---made-main.zip -d .
+          
+          # 2. Folder ke andar ki hidden aur normal tamaam files ko root directory ma move karein
+          if [ -d "Custom---made-main" ]; then
+            shopt -s dotglob
+            mv Custom---made-main/* .
+            rmdir Custom---made-main
+          fi
+
+      - name: Commit and push unzipped files
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add .
+          
+          if git status --porcelain | grep -q .; then
+            git commit -m "Automated: Moved all files from Custom---made-main to root directory"
+            git push
+          else
+            echo "No changes to commit"
+          fi
