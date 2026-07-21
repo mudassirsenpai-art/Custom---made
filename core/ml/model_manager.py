@@ -35,6 +35,7 @@ class ModelType(Enum):
     UPSCALE_LITE = "upscale_lite"
     YOLO_SPEECH_BUBBLE = "yolo_speech_bubble"
     YOLO_SPEECH_BUBBLE_2 = "yolo_speech_bubble_2"
+    YOLO_SPEECH_BUBBLE_3 = "yolo_speech_bubble_3"
     RTDETR_CONJOINED_BUBBLE = "rtdetr_conjoined_bubble"
     YOLO_OSBTEXT = "yolo_osbtext"
     YOLO_OSBTEXT_WEBTOON = "yolo_osbtext_webtoon"
@@ -127,6 +128,9 @@ class ModelManager:
             ModelType.YOLO_SPEECH_BUBBLE_2: (
                 model_dir / "yolo" / "manga109-segmentation-bubble.pt"
             ),
+            ModelType.YOLO_SPEECH_BUBBLE_3: (
+                model_dir / "yolo" / "comic-speech-bubble-detector.pt"
+            ),
             ModelType.RTDETR_CONJOINED_BUBBLE: (
                 model_dir / "rtdetr" / "comic-text-and-bubble-detector"
             ),
@@ -194,6 +198,10 @@ class ModelManager:
             ModelType.YOLO_SPEECH_BUBBLE_2: {
                 "repo_id": "huyvux3005/manga109-segmentation-bubble",
                 "filename": "best.pt",
+            },
+            ModelType.YOLO_SPEECH_BUBBLE_3: {
+                "repo_id": "ogkalu/comic-speech-bubble-detector-yolov8m",
+                "filename": "comic-speech-bubble-detector.pt",
             },
             ModelType.RTDETR_CONJOINED_BUBBLE: {
                 "repo_id": "ogkalu/comic-text-and-bubble-detector",
@@ -714,9 +722,11 @@ class ModelManager:
         """Determine which speech bubble model type a path corresponds to."""
         if model_path is None:
             return ModelType.YOLO_SPEECH_BUBBLE
-        p = Path(model_path)
+        p = Path(model_path).resolve()
         if p == self.model_paths[ModelType.YOLO_SPEECH_BUBBLE_2]:
             return ModelType.YOLO_SPEECH_BUBBLE_2
+        if p == self.model_paths[ModelType.YOLO_SPEECH_BUBBLE_3]:
+            return ModelType.YOLO_SPEECH_BUBBLE_3
         return ModelType.YOLO_SPEECH_BUBBLE
 
     def load_yolo_speech_bubble(
@@ -1597,6 +1607,8 @@ class ModelManager:
             models_unloaded.append("yolo_speech_bubble")
         if self.is_loaded(ModelType.YOLO_SPEECH_BUBBLE_2):
             models_unloaded.append("yolo_speech_bubble_2")
+        if self.is_loaded(ModelType.YOLO_SPEECH_BUBBLE_3):
+            models_unloaded.append("yolo_speech_bubble_3")
         if self.is_loaded(ModelType.RTDETR_CONJOINED_BUBBLE):
             models_unloaded.append("rtdetr_conjoined_bubble")
         if self.is_loaded(ModelType.SAM2):
@@ -1623,6 +1635,9 @@ class ModelManager:
         self.unload_model(ModelType.YOLO_SPEECH_BUBBLE, force_gc=False, verbose=verbose)
         self.unload_model(
             ModelType.YOLO_SPEECH_BUBBLE_2, force_gc=False, verbose=verbose
+        )
+        self.unload_model(
+            ModelType.YOLO_SPEECH_BUBBLE_3, force_gc=False, verbose=verbose
         )
         self.unload_model(
             ModelType.RTDETR_CONJOINED_BUBBLE, force_gc=False, verbose=verbose
