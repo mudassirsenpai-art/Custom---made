@@ -982,10 +982,22 @@ class ModelManager:
             log_message("PaddleOCR-VL-1.6 initialized.", verbose=verbose)
             return self.models[ModelType.PADDLE_OCR_VL]
 
+    # Languages for which PaddleOCR/PaddleX never actually shipped a
+    # PP-OCRv4-named det+rec pair (only "ch" and "en" did). Forcing
+    # ocr_version="PP-OCRv4" for any other lang raises "No models are
+    # available for lang=... and ocr_version='PP-OCRv4'" on current
+    # PaddleOCR/PaddleX releases (older releases silently fell back to
+    # PP-OCRv3 for these; that silent fallback was removed - see
+    # PaddlePaddle/PaddleOCR#15642). For those languages we omit
+    # ocr_version entirely and let PaddleOCR pick its default (currently
+    # PP-OCRv3-based) models instead.
+    _NO_V4_MODEL_LANGS = {"japan", "korean"}
+
     def get_paddleocr_classic(self, lang: str = "japan", verbose: bool = False):
-        """Get a classic PaddleOCR (PP-OCRv4, detection+recognition, NOT the
+        """Get a classic PaddleOCR (PP-OCRv4 where available, else
+        PaddleOCR's default version; detection+recognition, NOT the
         PaddleOCR-VL VLM) instance for the given language, loading it if
-        necessary. A separate instance is cached per language since PP-OCRv4
+        necessary. A separate instance is cached per language since these
         recognition models are monolingual, unlike PaddleOCR-VL.
 
         Args:
@@ -1005,24 +1017,36 @@ class ModelManager:
             if lang in cache and cache[lang] is not None:
                 return cache[lang]
 
+            use_v4 = lang not in self._NO_V4_MODEL_LANGS
+            version_label = "PP-OCRv4" if use_v4 else "default (no PP-OCRv4 model)"
             log_message(
-                f"Initializing PaddleOCR (Classic, PP-OCRv4, lang={lang})...",
+                f"Initializing PaddleOCR (Classic, {version_label}, lang={lang})...",
                 verbose=verbose,
             )
 
             from paddleocr import PaddleOCR
 
-            ocr_instance = PaddleOCR(
+            kwargs = dict(
                 lang=lang,
-                ocr_version="PP-OCRv4",
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=False,
+                # Defense-in-depth against the paddlepaddle 3.3.0 CPU/oneDNN
+                # regression (NotImplementedError: ConvertPirAttribute2Runtime
+                # Attribute not support [pir::ArrayAttribute<pir::DoubleAttribute>],
+                # see PaddlePaddle/Paddle#77340). requirements.txt pins
+                # paddlepaddle==3.2.2 as the primary fix; this flag keeps
+                # things working even if that pin is ever bumped forward.
+                enable_mkldnn=False,
             )
+            if use_v4:
+                kwargs["ocr_version"] = "PP-OCRv4"
+
+            ocr_instance = PaddleOCR(**kwargs)
 
             cache[lang] = ocr_instance
             log_message(
-                f"PaddleOCR (Classic, PP-OCRv4, lang={lang}) initialized.",
+                f"PaddleOCR (Classic, {version_label}, lang={lang}) initialized.",
                 verbose=verbose,
             )
             return ocr_instance
@@ -1080,6 +1104,11 @@ class ModelManager:
 
             from paddleocr import PaddleOCR
 
+            # enable_mkldnn=False: defense-in-depth against the paddlepaddle
+            # 3.3.0 CPU/oneDNN regression (NotImplementedError: ConvertPir
+            # Attribute2RuntimeAttribute not support [pir::ArrayAttribute
+            # <pir::DoubleAttribute>], see PaddlePaddle/Paddle#77340).
+            # requirements.txt pins paddlepaddle==3.2.2 as the primary fix.
             if korean:
                 ocr_instance = PaddleOCR(
                     text_detection_model_name="PP-OCRv5_mobile_det",
@@ -1087,6 +1116,7 @@ class ModelManager:
                     use_doc_orientation_classify=False,
                     use_doc_unwarping=False,
                     use_textline_orientation=False,
+                    enable_mkldnn=False,
                 )
             else:
                 ocr_instance = PaddleOCR(
@@ -1096,6 +1126,7 @@ class ModelManager:
                     use_doc_orientation_classify=False,
                     use_doc_unwarping=False,
                     use_textline_orientation=False,
+                    enable_mkldnn=False,
                 )
 
             self.models[model_type] = ocr_instance
