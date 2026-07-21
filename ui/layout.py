@@ -333,6 +333,12 @@ def create_layout(
                             max_lines=10,
                             elem_id="translator_special_instructions",
                         )
+                        gr.Markdown(
+                            "*SFX detection inside Outside-Text-Boxes (OSB) is automatic - "
+                            "the model tags sound effects itself so they can be skipped "
+                            "during inpainting. You don't need to type anything here for it.*",
+                            elem_id="translator_sfx_note",
+                        )
                         overlap_llm_with_inpaint = gr.Checkbox(
                             label="Overlap LLM With Inpainting",
                             value=bool(
@@ -410,6 +416,12 @@ def create_layout(
                             lines=1,
                             max_lines=10,
                             elem_id="batch_special_instructions",
+                        )
+                        gr.Markdown(
+                            "*SFX detection inside Outside-Text-Boxes (OSB) is automatic - "
+                            "the model tags sound effects itself so they can be skipped "
+                            "during inpainting. You don't need to type anything here for it.*",
+                            elem_id="batch_sfx_note",
                         )
                         batch_parallel_requests = gr.Slider(
                             minimum=1,
