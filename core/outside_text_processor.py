@@ -49,6 +49,12 @@ class OutsideTextWork:
     mime_type: str
     cv2_ext: str
     outside_text_data: List[Dict[str, Any]] = field(default_factory=list)
+    # Bboxes (x1, y1, x2, y2) of SFX-flagged items that share a mask_group with
+    # at least one surviving (non-SFX) item. finish_outside_text_work() carves
+    # these rectangles out of that group's combined_mask before inpainting, so
+    # a mixed group's inpaint never touches the SFX item's original pixels.
+    sfx_carve_bboxes: List[Tuple[int, int, int, int]] = field(default_factory=list)
+
 
 
 def _build_outside_text_data(
@@ -626,6 +632,91 @@ def prepare_outside_text_work(
         return None
 
 
+def drop_sfx_skip_regions(work: OutsideTextWork, verbose: bool = False) -> None:
+    """Remove OSB regions flagged is_sfx=True from prepared work in-place.
+
+    Called after translation (so bubble["is_sfx"] flags have been attached to
+    the outside_text_data dicts) and before finish_outside_text_work(), so the
+    dropped regions are never inpainted and never rendered. Since
+    outside_text_data entries are the same dict objects referenced by
+    sorted_bubble_data (both built from the same underlying dicts in
+    pipeline.py), an is_sfx flag set by the caller is visible here directly.
+    """
+    outside_text_data = work.outside_text_data
+    if not outside_text_data:
+        return
+
+    keep_indices = [
+        i
+        for i, item in enumerate(outside_text_data)
+        if not item.get("is_sfx", False)
+    ]
+    if len(keep_indices) == len(outside_text_data):
+        return  # nothing flagged, no-op
+
+    dropped = len(outside_text_data) - len(keep_indices)
+    log_message(
+        f"Skipping inpaint for {dropped} SFX-flagged OSB region(s); "
+        "leaving original pixels untouched",
+        verbose=verbose,
+        always_print=True,
+    )
+
+    keep_set = set(keep_indices)
+
+    # Before remapping indices away, capture the bbox of every SFX-flagged
+    # item that shares a mask_group with at least one surviving item ("mixed"
+    # group). The group-drop logic below only removes groups whose items are
+    # *entirely* SFX; a mixed group survives (correctly, so its non-SFX item
+    # still gets inpainted+rendered) but its combined_mask still covers the
+    # SFX item's footprint too. finish_outside_text_work() subtracts these
+    # rectangles from that group's combined_mask so the SFX pixels are left
+    # untouched even though the rest of the group is inpainted.
+    sfx_carve_bboxes: List[Tuple[int, int, int, int]] = []
+    for group in work.mask_groups:
+        old_mask_indices = group.get("mask_indices", [])
+        if not old_mask_indices:
+            continue
+        surviving_old = [i for i in old_mask_indices if i in keep_set]
+        dropped_old = [i for i in old_mask_indices if i not in keep_set]
+        if not surviving_old or not dropped_old:
+            # Either nothing dropped (no-op for this group) or the whole
+            # group was SFX-only (handled by the group-drop logic below).
+            continue
+        for old_i in dropped_old:
+            bbox = outside_text_data[old_i].get("bbox")
+            if bbox:
+                sfx_carve_bboxes.append(tuple(int(c) for c in bbox))
+    work.sfx_carve_bboxes = list(work.sfx_carve_bboxes) + sfx_carve_bboxes
+
+    work.outside_text_data = [outside_text_data[i] for i in keep_indices]
+    work.outside_text_results = [
+        r for i, r in enumerate(work.outside_text_results) if i in keep_set
+    ]
+    work.raw_outside_text_results = [
+        r for i, r in enumerate(work.raw_outside_text_results) if i in keep_set
+    ]
+
+    # mask_groups reference outside_text_results/raw_outside_text_results by
+    # index via "mask_indices"; since we dropped entries above, those indices
+    # must be remapped to the new (post-drop) indices, and any group left
+    # with no surviving indices must be dropped entirely so it is never
+    # inpainted or composited.
+    old_to_new = {old_i: new_i for new_i, old_i in enumerate(keep_indices)}
+    new_mask_groups = []
+    for group in work.mask_groups:
+        old_mask_indices = group.get("mask_indices", [])
+        surviving = [old_to_new[i] for i in old_mask_indices if i in old_to_new]
+        if old_mask_indices and not surviving:
+            # Every OSB item this mask group covers was SFX-skipped.
+            continue
+        if surviving:
+            group = dict(group)
+            group["mask_indices"] = surviving
+        new_mask_groups.append(group)
+    work.mask_groups = new_mask_groups
+
+
 def finish_outside_text_work(
     work: OutsideTextWork,
 ) -> Tuple[Image.Image, List[Dict[str, Any]]]:
@@ -947,6 +1038,19 @@ def finish_outside_text_work(
                     combined_mask = np.logical_and(
                         combined_mask, np.logical_not(total_bubble_mask)
                     )
+                    # Carve out any SFX-flagged item's bbox that shares this
+                    # mixed group with a surviving item, so this group's
+                    # inpaint never touches that SFX region's original pixels
+                    # (see drop_sfx_skip_regions()). Uses a plain rectangle
+                    # subtract instead of reshaping the group's mask/index
+                    # bookkeeping, so every inpaint backend below (Flux 9B/4B,
+                    # Kontext, OpenCV, none) sees the same already-carved
+                    # mask.
+                    for cx1, cy1, cx2, cy2 in work.sfx_carve_bboxes:
+                        cx1c, cy1c = max(0, cx1), max(0, cy1)
+                        cx2c, cy2c = min(img_w, cx2), min(img_h, cy2)
+                        if cx2c > cx1c and cy2c > cy1c:
+                            combined_mask[cy1c:cy2c, cx1c:cx2c] = False
                     if not np.any(combined_mask):
                         log_message(
                             "Skipping outside text region after bubble masking (no remaining area)",
