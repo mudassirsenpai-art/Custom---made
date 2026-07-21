@@ -116,6 +116,7 @@ Your sole purpose is to accurately transcribe the original text from a series of
 - You must return your response as a single numbered list with exactly one line per input image.
 - The numbering must correspond to the input image order (1, 2, 3...).
 - The format must be `i: <transcribed {lang_label}text>` where `i` is the input image number.
+- **No Merging/Duplication:** Each numbered item corresponds to exactly ONE input image and must contain ONLY that image's own text. Never copy, repeat, or append another item's transcription into a different item's line, even if the images are part of the same conversation or panel.
 - Do not include section headers, explanations, or formatting outside of this list.
 """  # noqa
 
@@ -238,6 +239,18 @@ You must use the following markdown-style markers to convey emphasis:
 {core_rules}
 """  # noqa
 
+    no_merge_rule = (
+        "- **No Merging/Duplication:** Each numbered item corresponds to exactly "
+        "ONE input (one image / one transcribed line) and must contain ONLY that "
+        "input's own text. Never copy, repeat, or append another item's text into "
+        "a different item's line, even if the items are part of the same "
+        "conversation or seem related. Do not insert a literal newline inside a "
+        "single item's translation unless the corresponding source input for that "
+        "same item already contains a newline/line-break itself — if the source "
+        "input is a single line, the translated output for that item must also be "
+        "a single line."
+    )
+
     if mode == "one-step":
         output_schema = f"""
 ## OUTPUT SCHEMA
@@ -245,6 +258,7 @@ You must use the following markdown-style markers to convey emphasis:
 - The numbering must correspond to the input image order (1, 2, 3...).
 - For each item, provide both transcription and translation in the format:
   `i: <transcribed text> || <translated {output_language} text>` where `i` is the input image number.
+{no_merge_rule}
 - **Outside-bubble sound effects (SFX):** For items that are outside-speech-bubble text (OSB) AND are a sound effect (Audible SFX), prefix the translated portion with a `[SFX]` marker, e.g. `i: <transcribed text> || [SFX] <translated {output_language} text>`. Only use this marker for outside-bubble sound effects — never for in-bubble dialogue/narration or for OSB items that are not sound effects (e.g. captions, narration, mimetic FX describing an action).
 - Do not include section headers, explanations, or formatting outside of this list.
 """
@@ -254,6 +268,7 @@ You must use the following markdown-style markers to convey emphasis:
 - You must return your response as a single numbered list with exactly one line per input text.
 - The numbering must correspond to the input order (1, 2, 3...).
 - The format must be `i: <translated {output_language} text>` where `i` is the input text number.
+{no_merge_rule}
 - **Outside-bubble sound effects (SFX):** For items that are outside-speech-bubble text (OSB) AND are a sound effect (Audible SFX), prefix the translated text with a `[SFX]` marker, e.g. `i: [SFX] <translated {output_language} text>`. Only use this marker for outside-bubble sound effects — never for in-bubble dialogue/narration or for OSB items that are not sound effects (e.g. captions, narration, mimetic FX describing an action).
 - Do not include section headers, explanations, or formatting outside of this list.
 """  # noqa
@@ -948,6 +963,28 @@ def _parse_llm_response_unified(
                 final_list.append(result_dict[i])
             else:
                 final_list.append(f"[{provider}: Missing item {i}]")
+
+        # Detection-only safety net: flag (but do not auto-repair) items that
+        # look like the model merged multiple items into one - i.e. an item
+        # containing an embedded newline whose text also contains another
+        # item's full text as a substring. Auto-repairing this is unsafe
+        # (we can't reliably know which portion belongs to item i), so this
+        # only logs a warning for visibility; the raw parsed text is still
+        # returned unchanged.
+        for i, text in enumerate(final_list, start=1):
+            if "\n" not in text:
+                continue
+            for j, other_text in enumerate(final_list, start=1):
+                if i == j or not other_text or len(other_text) < 4:
+                    continue
+                if other_text in text:
+                    log_message(
+                        f"Warning: item {i} appears to contain item {j}'s text "
+                        "merged in (possible LLM merge/duplication) - "
+                        "rendering will use the raw text as-is",
+                        always_print=True,
+                    )
+                    break
 
         log_message(
             f"Parsed {len(result_dict)} items from unified response (expected {total_elements})",
