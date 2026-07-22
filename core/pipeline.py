@@ -1855,7 +1855,32 @@ def translate_and_render(
                             finish_outside_text_work(outside_work)
                         )
                         outside_work = None
-                        pil_cleaned_image = pil_image_processed
+                        # finish_outside_text_work() only inpaints OSB text on the
+                        # original page - it knows nothing about speech bubbles.
+                        # Re-run speech-bubble cleaning on top of that OSB-cleaned
+                        # page (mirroring _run_deferred_inpaint_and_clean() below)
+                        # instead of overwriting pil_cleaned_image with it directly,
+                        # or the bubble inpainting done earlier at the top of this
+                        # function gets silently discarded and Pass 2 renders text
+                        # over un-inpainted bubbles.
+                        if bubble_data:
+                            log_message(
+                                "Cleaning speech bubbles...", verbose=verbose
+                            )
+                            cleaned_image_cv, processed_bubbles_info = (
+                                _clean_speech_bubbles_for_page(
+                                    pil_image_processed,
+                                    bubble_data,
+                                    config,
+                                    device,
+                                    processing_scale,
+                                    verbose,
+                                    pil_to_cv2(pil_image_processed),
+                                )
+                            )
+                            pil_cleaned_image = cv2_to_pil(cleaned_image_cv)
+                        else:
+                            pil_cleaned_image = pil_image_processed
                         if pil_cleaned_image.mode != target_mode:
                             pil_cleaned_image = pil_cleaned_image.convert(target_mode)
                         final_image_to_save = pil_cleaned_image
