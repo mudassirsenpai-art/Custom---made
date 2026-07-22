@@ -177,7 +177,6 @@ def save_manual_checkpoint(
     target_mode: str,
     image_path: Union[str, Path],
     config: "MangaTranslatorConfig",
-    processing_scale: float = 1.0,
 ) -> None:
     """
     Persist everything Pass 2 (manual translation render) needs to disk, so
@@ -207,14 +206,13 @@ def save_manual_checkpoint(
         slim_bubbles.append(slim)
 
     payload = {
-        "version": 2,
+        "version": 1,
         "image_path": str(image_path),
         "target_mode": target_mode,
         "pil_cleaned_image": pil_cleaned_image,
         "sorted_bubble_data": slim_bubbles,
         "processed_bubbles_info": processed_bubbles_info,
         "outside_text_data": outside_text_data,
-        "processing_scale": float(processing_scale),
         "translation_config_snapshot": {
             "output_language": config.translation.output_language,
             "input_language": config.translation.input_language,
@@ -257,11 +255,7 @@ def _render_from_manual_checkpoint(
     if pil_cleaned_image.mode != target_mode:
         pil_cleaned_image = pil_cleaned_image.convert(target_mode)
 
-    # Must match the processing_scale used in Pass 1 (see save_manual_checkpoint),
-    # since font sizing/padding/geometry were computed relative to it when the
-    # bubbles were cleaned. Older checkpoints (pre-v2, saved before this fix)
-    # won't have it, so fall back to 1.0 for those only.
-    processing_scale = checkpoint.get("processing_scale", 1.0)
+    processing_scale = 1.0  # baked into the checkpointed masks/geometry already
     main_min_font = scale_font_size(
         config.rendering.min_font_size, processing_scale, minimum=4, maximum=256
     )
@@ -1454,7 +1448,6 @@ def translate_and_render(
                 target_mode=target_mode,
                 image_path=image_path,
                 config=config,
-                processing_scale=processing_scale,
             )
             if output_path:
                 final_to_save = final_image_to_save
@@ -1636,7 +1629,6 @@ def translate_and_render(
                         target_mode=target_mode,
                         image_path=image_path,
                         config=config,
-                        processing_scale=processing_scale,
                     )
                     if output_path:
                         final_to_save = pil_cleaned_image
@@ -1895,7 +1887,6 @@ def translate_and_render(
                         target_mode=target_mode,
                         image_path=image_path,
                         config=config,
-                        processing_scale=processing_scale,
                     )
                     if output_path:
                         final_to_save = pil_cleaned_image
