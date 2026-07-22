@@ -68,11 +68,20 @@ PREVIOUS_CONTEXT_CACHE_MAX_SIZE = 32
 NATURAL_SORT_TOKEN_RE = re.compile(r"(\d+)")
 
 
-def _should_overlap_llm_with_inpaint(config: MangaTranslatorConfig) -> bool:
+def _should_overlap_llm_with_inpaint(
+    config: MangaTranslatorConfig,
+    manual_checkpoint_save_path: Optional[Union[str, Path]] = None,
+) -> bool:
     return (
         bool(getattr(config, "overlap_llm_with_inpaint", False))
         and not config.cleaning_only
         and not getattr(config, "test_mode", False)
+        # Manual mode Pass 1 only OCRs (no LLM translation call happens
+        # here - that runs later in Pass 2, from the user's edited JSON),
+        # so cleaning/inpainting deferred "to overlap with the LLM call"
+        # would never actually get triggered, silently checkpointing the
+        # uncleaned image. Always take the eager path in Pass 1.
+        and manual_checkpoint_save_path is None
     )
 
 
@@ -1314,7 +1323,9 @@ def translate_and_render(
     sfx_skip_inpaint_enabled = bool(
         getattr(config.outside_text, "sfx_skip_inpaint", True)
     )
-    use_llm_inpaint_overlap = _should_overlap_llm_with_inpaint(config)
+    use_llm_inpaint_overlap = _should_overlap_llm_with_inpaint(
+        config, manual_checkpoint_save_path
+    )
     defer_osb_inpaint = (
         use_llm_inpaint_overlap or sfx_skip_inpaint_enabled
     ) and not config.cleaning_only and not getattr(config, "test_mode", False)
@@ -1839,47 +1850,7 @@ def translate_and_render(
                     # pasting back original_crop_pil (captured pre-inpaint,
                     # before this call), so marking something SFX in the JSON
                     # still restores the original pixels correctly.
-                    if use_llm_inpaint_overlap:
-                        # Speech-bubble cleaning was deferred earlier (see
-                        # `if not use_llm_inpaint_overlap:` above) so it could run
-                        # concurrently with the LLM translation call. Manual mode
-                        # never makes that translation call, so nothing has resolved
-                        # the deferral yet - pil_cleaned_image is still the raw,
-                        # uncleaned page here. Run the deferred inpaint/clean now,
-                        # otherwise the checkpoint (and Pass 2's render) end up with
-                        # the original untranslated text still under the bubbles.
-                        page_image = pil_image_processed
-                        osb_data = outside_text_data
-                        if outside_work is not None:
-                            page_image, osb_data = finish_outside_text_work(
-                                outside_work
-                            )
-                        fallback_cv = pil_to_cv2(page_image)
-                        if bubble_data:
-                            log_message(
-                                "Cleaning speech bubbles...", verbose=verbose
-                            )
-                            cleaned_image_cv, processed_bubbles_info = (
-                                _clean_speech_bubbles_for_page(
-                                    page_image,
-                                    bubble_data,
-                                    config,
-                                    device,
-                                    processing_scale,
-                                    verbose,
-                                    fallback_cv,
-                                )
-                            )
-                        else:
-                            cleaned_image_cv = fallback_cv
-                        pil_image_processed = page_image
-                        outside_text_data = osb_data
-                        outside_work = None
-                        pil_cleaned_image = cv2_to_pil(cleaned_image_cv)
-                        if pil_cleaned_image.mode != target_mode:
-                            pil_cleaned_image = pil_cleaned_image.convert(target_mode)
-                        final_image_to_save = pil_cleaned_image
-                    elif outside_work is not None:
+                    if outside_work is not None:
                         pil_image_processed, outside_text_data = (
                             finish_outside_text_work(outside_work)
                         )
