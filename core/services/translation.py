@@ -963,7 +963,7 @@ def _parse_llm_response_unified(
         return [f"[{provider}: Parse error]"] * total_elements
 
 
-_SFX_MARKER_PATTERN = re.compile(r"^\s*\[SFX\]\s*", re.IGNORECASE)
+_SFX_MARKER_PATTERN = re.compile(r"^\s*(?:\*{1,3})?\[SFX\](?:\*{1,3})?\s*", re.IGNORECASE)
 
 
 def _strip_sfx_marker(text: str) -> Tuple[str, bool]:
@@ -1807,7 +1807,12 @@ def call_translation_api_batch(
     if osb_indices:
         osb_list_str = ", ".join(map(str, osb_indices))
         hints.append(
-            f"Items [{osb_list_str}] contain sound effects, mimetic effects, narration, or internal monologues."
+            f"Items [{osb_list_str}] are outside-bubble (OSB) text — this can be an "
+            "audible sound effect (SFX), a mimetic effect, narration, or an internal "
+            "monologue; judge each one individually from its image/context. Only "
+            "items in this list are eligible for the [SFX] marker, and only when "
+            "they are specifically an audible sound effect (e.g. a bang, crash, or "
+            "impact noise) — not mimetic FX, narration, or monologue."
         )
 
     context_hints = ""
@@ -1941,7 +1946,9 @@ Apply your OCR transcription rules to each image provided.{special_instructions_
 ## INPUT DATA
 """
             for i, text in enumerate(formatted_texts):
-                ocr_input_section += f"{i + 1}: {text}\n"
+                meta = bubble_metadata[i] if i < len(bubble_metadata) else {}
+                type_tag = "[OSB]" if meta.get("is_outside_text", False) else "[Bubble]"
+                ocr_input_section += f"{i + 1}: {type_tag} {text}\n"
 
             full_page_context = (
                 "A full-page image is also provided for visual and narrative context."
