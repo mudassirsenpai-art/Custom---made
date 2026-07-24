@@ -1,4 +1,4 @@
-import base64
+=import base64
 import json
 import re
 from io import BytesIO
@@ -246,6 +246,7 @@ You must use the following markdown-style markers to convey emphasis:
 - For each item, provide both transcription and translation in the format:
   `i: <transcribed text> || <translated {output_language} text>` where `i` is the input image number.
 - **Outside-bubble sound effects (SFX):** For items that are outside-speech-bubble text (OSB) AND are a sound effect (Audible SFX), prefix the translated portion with a `[SFX]` marker, e.g. `i: <transcribed text> || [SFX] <translated {output_language} text>`. Only use this marker for outside-bubble sound effects — never for in-bubble dialogue/narration or for OSB items that are not sound effects (e.g. captions, narration, mimetic FX describing an action).
+- **Do not forget the `[SFX]` marker:** Before finalizing each line, re-check whether it is an outside-bubble sound effect. If it is, the `[SFX]` marker is mandatory — never omit it, even in a long batch. Apply this check independently to every line, not just the first few.
 - Do not include section headers, explanations, or formatting outside of this list.
 """
     elif mode == "two-step":
@@ -255,6 +256,7 @@ You must use the following markdown-style markers to convey emphasis:
 - The numbering must correspond to the input order (1, 2, 3...).
 - The format must be `i: <translated {output_language} text>` where `i` is the input text number.
 - **Outside-bubble sound effects (SFX):** For items that are outside-speech-bubble text (OSB) AND are a sound effect (Audible SFX), prefix the translated text with a `[SFX]` marker, e.g. `i: [SFX] <translated {output_language} text>`. Only use this marker for outside-bubble sound effects — never for in-bubble dialogue/narration or for OSB items that are not sound effects (e.g. captions, narration, mimetic FX describing an action).
+- **Do not forget the `[SFX]` marker:** Before finalizing each line, re-check whether it is an outside-bubble sound effect. If it is, the `[SFX]` marker is mandatory — never omit it, even in a long batch. Apply this check independently to every line, not just the first few.
 - Do not include section headers, explanations, or formatting outside of this list.
 """  # noqa
     else:
@@ -963,7 +965,23 @@ def _parse_llm_response_unified(
         return [f"[{provider}: Parse error]"] * total_elements
 
 
-_SFX_MARKER_PATTERN = re.compile(r"^\s*(?:\*{1,3})?\[SFX\](?:\*{1,3})?\s*", re.IGNORECASE)
+# Leading marker, tolerant of: bold/italic wrappers (*, **, ***, _), extra
+# internal whitespace inside the brackets ("[ SFX ]"), a trailing colon/dash
+# separator the model sometimes adds ("[SFX]:", "[SFX] -"), and SFX written
+# without brackets at all ("SFX:", "SFX -") since some providers drop the
+# brackets under long context even when they still intend the tag.
+_SFX_MARKER_PATTERN = re.compile(
+    r"^\s*(?:[\*_]{1,3})?"
+    r"(?:\[\s*SFX\s*\]|SFX\b)"
+    r"(?:[\*_]{1,3})?"
+    r"\s*[:\-–—]?\s*",
+    re.IGNORECASE,
+)
+
+# Fallback: catches a [SFX] marker anywhere near the start of the string, in
+# case the model prefixed it with something else (e.g. stray punctuation)
+# before the marker itself.
+_SFX_MARKER_PATTERN_ANYWHERE = re.compile(r"\[\s*SFX\s*\]", re.IGNORECASE)
 
 
 def _strip_sfx_marker(text: str) -> Tuple[str, bool]:
@@ -976,10 +994,21 @@ def _strip_sfx_marker(text: str) -> Tuple[str, bool]:
     """
     if not text:
         return text, False
+
     match = _SFX_MARKER_PATTERN.match(text)
-    if not match:
-        return text, False
-    return text[match.end():].strip(), True
+    if match:
+        return text[match.end():].strip(), True
+
+    # Model sometimes emits the bracketed marker but not flush at the start
+    # (e.g. a stray leading dash/quote before it). Only take this path if the
+    # marker shows up early in the string, so a marker mentioned mid-sentence
+    # elsewhere isn't mistaken for the actual tag.
+    stray_match = _SFX_MARKER_PATTERN_ANYWHERE.search(text[:20])
+    if stray_match:
+        cleaned = (text[:stray_match.start()] + text[stray_match.end():]).strip()
+        return cleaned, True
+
+    return text, False
 
 
 def _prepare_images_for_ocr(
