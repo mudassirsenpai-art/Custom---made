@@ -2,6 +2,7 @@ import gc
 import os
 import random
 import tempfile
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -124,6 +125,7 @@ def _inpaint_colored_bubbles_with_coordinator(
                         "candidate": candidate,
                         "image": None,
                         "error": e,
+                        "traceback": traceback.format_exc(),
                     }
 
             return job
@@ -133,9 +135,11 @@ def _inpaint_colored_bubbles_with_coordinator(
             candidate = result["candidate"]
             bubble_info = candidate["bubble_info"]
             if result["error"] is not None:
+                err = result["error"]
                 log_message(
                     f"Flux inpainting failed for bubble {candidate['bbox_tuple']}: "
-                    f"{result['error']}; falling back to standard fill",
+                    f"{type(err).__name__}: {err}; falling back to standard fill\n"
+                    f"{result.get('traceback', '')}",
                     always_print=True,
                 )
                 continue
@@ -849,6 +853,25 @@ def clean_speech_bubbles(
             colored_bubbles = [
                 b for b in processed_bubbles if b.get("is_colored", False)
             ]
+            # Nunchaku backend requires an HF token; other backends (sdnq, sdcpp)
+            # don't. Warn up front so a missing-token fallback isn't silent —
+            # this branch used to be unreachable dead code (an `elif` on the
+            # same truthy `colored_bubbles` check below it), so this warning
+            # never actually printed even when it was the real cause of a
+            # bubble silently getting flat-filled instead of inpainted.
+            needs_hf_token = (
+                inpaint_method not in ("flux_klein_9b", "flux_klein_4b")
+                and flux_backend == "nunchaku"
+            )
+            if colored_bubbles and needs_hf_token and not flux_hf_token:
+                log_message(
+                    "Colored bubbles detected but Flux inpainting skipped "
+                    "(missing Hugging Face token for nunchaku backend); "
+                    "falling back to standard fill",
+                    always_print=True,
+                )
+                colored_bubbles = []
+
             if colored_bubbles:
                 log_message(
                     f"Inpainting {len(colored_bubbles)} colored bubbles with Flux",
@@ -956,7 +979,9 @@ def clean_speech_bubbles(
                                 )
                             except Exception as e:
                                 log_message(
-                                    f"Flux inpainting failed for bubble {bbox_tuple}: {e}; falling back to standard fill",
+                                    f"Flux inpainting failed for bubble {bbox_tuple}: "
+                                    f"{type(e).__name__}: {e}; falling back to standard fill\n"
+                                    f"{traceback.format_exc()}",
                                     always_print=True,
                                 )
                                 continue
@@ -991,7 +1016,8 @@ def clean_speech_bubbles(
                     )
                 except Exception as e:
                     log_message(
-                        f"Flux inpainting aborted; falling back to standard fill: {e}",
+                        f"Flux inpainting aborted; falling back to standard fill: "
+                        f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
                         always_print=True,
                     )
                 finally:
@@ -1001,12 +1027,6 @@ def clean_speech_bubbles(
                                 os.remove(temp_file)
                             except Exception:
                                 pass
-            elif colored_bubbles:
-                log_message(
-                    "Colored bubbles detected but Flux inpainting skipped "
-                    "(missing Hugging Face token); falling back to standard fill",
-                    always_print=True,
-                )
 
         # Group masks by color for efficient batch processing (skip already inpainted regions)
         if processed_bubbles:
