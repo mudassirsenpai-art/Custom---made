@@ -33,6 +33,7 @@ class ModelType(Enum):
 
     UPSCALE = "upscale"
     UPSCALE_LITE = "upscale_lite"
+    LAMA = "lama"
     YOLO_SPEECH_BUBBLE = "yolo_speech_bubble"
     YOLO_SPEECH_BUBBLE_2 = "yolo_speech_bubble_2"
     YOLO_SPEECH_BUBBLE_3 = "yolo_speech_bubble_3"
@@ -122,6 +123,7 @@ class ModelManager:
             ModelType.UPSCALE_LITE: (
                 model_dir / "upscale" / "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors"
             ),
+            ModelType.LAMA: (model_dir / "lama" / "big-lama.pt"),
             ModelType.YOLO_SPEECH_BUBBLE: (
                 model_dir / "yolo" / "yolov8m_seg-speech-bubble.pt"
             ),
@@ -166,6 +168,9 @@ class ModelManager:
                 "https://huggingface.co/Kim2091/2x-AnimeSharpV4/resolve/main/"
                 "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors"
             ),
+            ModelType.LAMA: (
+                "https://huggingface.co/Sanster/models/resolve/main/big-lama.pt"
+            ),
             ModelType.FLUX_KLEIN_SDCPP_VAE: (
                 "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/"
                 "split_files/vae/flux2-vae.safetensors"
@@ -190,6 +195,10 @@ class ModelManager:
             ModelType.UPSCALE_LITE: {
                 "repo_id": "Kim2091/2x-AnimeSharpV4",
                 "filename": "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors",
+            },
+            ModelType.LAMA: {
+                "repo_id": "Sanster/models",
+                "filename": "big-lama.pt",
             },
             ModelType.YOLO_SPEECH_BUBBLE: {
                 "repo_id": "kitsumed/yolov8m_seg-speech-bubble",
@@ -716,6 +725,40 @@ class ModelManager:
             )
             self.models[ModelType.UPSCALE_LITE] = model
             log_message("Upscale lite model loaded.", verbose=verbose)
+            return model
+
+    def load_lama(self, verbose: bool = False):
+        """Load LaMa (Large Mask Inpainting) JIT-traced model.
+
+        LaMa is a lightweight CNN-based inpainting model (not diffusion), so
+        it runs at usable speed on CPU (~1-3s per region) unlike Flux, while
+        still producing much cleaner texture reconstruction than classic
+        OpenCV inpainting on complex manga backgrounds (halftone, gradients,
+        screentones).
+        """
+        with self._lock:
+            if self.is_loaded(ModelType.LAMA):
+                return self.models[ModelType.LAMA]
+
+            log_message("Loading LaMa inpainting model...", verbose=verbose)
+            path = self.model_paths[ModelType.LAMA]
+
+            try:
+                hf_info = self.model_hf_repos[ModelType.LAMA]
+                self._ensure_hf_file(
+                    hf_info["repo_id"], hf_info["filename"], path, verbose=verbose
+                )
+            except Exception:
+                self._ensure_file(
+                    path, self.model_urls[ModelType.LAMA], verbose=verbose
+                )
+
+            # big-lama.pt is a JIT-traced TorchScript model: self-contained,
+            # no separate architecture/state_dict step needed.
+            model = torch.jit.load(str(path), map_location=self.device)
+            model.eval()
+            self.models[ModelType.LAMA] = model
+            log_message("LaMa model loaded.", verbose=verbose)
             return model
 
     def _resolve_speech_bubble_model_type(self, model_path: Optional[str]) -> ModelType:
