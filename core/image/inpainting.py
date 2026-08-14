@@ -30,6 +30,116 @@ FLUX_GUIDANCE_SCALE = 2.5  # Flux Kontext guidance scale
 CONTEXT_PADDING_RATIO = 0.5  # Context padding is 50% of detection size
 MAX_CONTEXT_PADDING = 80  # Context padding capped at 80 pixels
 
+# OpenCV texture-inpainting parameters (lightweight, no-GPU fallback / "opencv" method)
+CV2_INPAINT_RADIUS = 5  # Radius of circular neighborhood used by cv2.inpaint
+CV2_MASK_DILATE_PX = 3  # Grow the OCR mask slightly so glyph edges/anti-aliasing are fully erased
+CV2_INPAINT_CONTEXT_PADDING = 16  # Extra border of real pixels fed to cv2.inpaint for better texture context
+
+
+def opencv_texture_inpaint(
+    pil_image: "Image.Image",
+    mask_np: np.ndarray,
+    method: str = "telea",
+    radius: int = CV2_INPAINT_RADIUS,
+    dilate_px: int = CV2_MASK_DILATE_PX,
+    bbox: Optional[Tuple[int, int, int, int]] = None,
+    context_padding: int = CV2_INPAINT_CONTEXT_PADDING,
+    verbose: bool = False,
+) -> "Image.Image":
+    """
+    Texture-aware OSB/SFX text removal using OpenCV's classic inpainting
+    (Telea or Navier-Stokes). Unlike a flat color fill, this reconstructs the
+    surrounding artwork (patterns, gradients, wood grain, fabric, etc.) so the
+    erased text region blends back into the art instead of covering it with a
+    solid rectangle.
+
+    Args:
+        pil_image: Full-page PIL image (RGB) to inpaint.
+        mask_np: Boolean (or 0/255) array, same H/W as pil_image, True/255
+            where the original text pixels are and should be erased.
+        method: "telea" (cv2.INPAINT_TELEA) or "ns" (cv2.INPAINT_NS).
+        radius: Inpainting radius passed to cv2.inpaint.
+        dilate_px: How many pixels to grow the mask by before inpainting, so
+            anti-aliased glyph edges don't leave faint text ghosts behind.
+        bbox: Optional (x1, y1, x2, y2) of the text region. When given, only a
+            padded crop around it is sent through cv2.inpaint (much faster on
+            large pages); the result is pasted back using the mask so nothing
+            outside the mask is touched.
+        context_padding: Extra pixels of real artwork included around bbox so
+            cv2.inpaint has enough surrounding texture to draw from.
+        verbose: Enable debug logging.
+
+    Returns:
+        A new PIL.Image with the masked text pixels erased and the
+        surrounding artwork reconstructed. If nothing needs inpainting (empty
+        mask) the original image is returned unchanged.
+    """
+    if pil_image is None:
+        return pil_image
+
+    img_w, img_h = pil_image.size
+    mask_bool = mask_np.astype(bool)
+    if not np.any(mask_bool):
+        return pil_image
+
+    flag = cv2.INPAINT_NS if method == "ns" else cv2.INPAINT_TELEA
+
+    if bbox is not None:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        cx1 = max(0, x1 - context_padding)
+        cy1 = max(0, y1 - context_padding)
+        cx2 = min(img_w, x2 + context_padding)
+        cy2 = min(img_h, y2 + context_padding)
+    else:
+        ys, xs = np.where(mask_bool)
+        if ys.size == 0:
+            return pil_image
+        cx1 = max(0, int(xs.min()) - context_padding)
+        cy1 = max(0, int(ys.min()) - context_padding)
+        cx2 = min(img_w, int(xs.max()) + 1 + context_padding)
+        cy2 = min(img_h, int(ys.max()) + 1 + context_padding)
+
+    if cx2 <= cx1 or cy2 <= cy1:
+        return pil_image
+
+    crop_pil = pil_image.crop((cx1, cy1, cx2, cy2)).convert("RGB")
+    crop_bgr = cv2.cvtColor(np.array(crop_pil), cv2.COLOR_RGB2BGR)
+
+    local_mask = mask_bool[cy1:cy2, cx1:cx2]
+    if not np.any(local_mask):
+        return pil_image
+
+    local_mask_u8 = (local_mask.astype(np.uint8)) * 255
+    if dilate_px > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (dilate_px * 2 + 1, dilate_px * 2 + 1)
+        )
+        local_mask_u8 = cv2.dilate(local_mask_u8, kernel, iterations=1)
+
+    try:
+        inpainted_bgr = cv2.inpaint(crop_bgr, local_mask_u8, radius, flag)
+    except Exception as e:
+        log_message(
+            f"cv2.inpaint failed ({e}); returning original crop unchanged",
+            verbose=verbose,
+        )
+        return pil_image
+
+    inpainted_rgb = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
+    inpainted_crop_pil = Image.fromarray(inpainted_rgb)
+
+    result = pil_image.copy()
+    # Paste only the (dilated) masked pixels back, so any anti-aliasing at the
+    # crop boundary from cv2.inpaint never bleeds into untouched artwork.
+    paste_mask_pil = Image.fromarray(local_mask_u8, mode="L")
+    result.paste(inpainted_crop_pil, (cx1, cy1), mask=paste_mask_pil)
+
+    log_message(
+        f"OpenCV {method.upper()} inpaint applied to {cx2 - cx1}x{cy2 - cy1} region",
+        verbose=verbose,
+    )
+    return result
+
 
 def _prompt_value_to_cpu(value):
     if isinstance(value, torch.Tensor):
