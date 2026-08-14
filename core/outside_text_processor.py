@@ -1,4 +1,4 @@
-import base64
+=import base64
 import gc
 import os
 import random
@@ -20,7 +20,11 @@ from core.batch_coordinator import (
 )
 from core.config import MangaTranslatorConfig
 from core.image.image_utils import cv2_to_pil, pil_to_cv2, process_bubble_image_cached
-from core.image.inpainting import FluxKleinInpainter, FluxKontextInpainter
+from core.image.inpainting import (
+    FluxKleinInpainter,
+    FluxKontextInpainter,
+    opencv_texture_inpaint,
+)
 from core.image.ocr_detection import OutsideTextDetector, extract_text_with_manga_ocr
 from core.ml.model_manager import get_model_manager
 from utils.logging import log_message
@@ -840,7 +844,11 @@ def finish_outside_text_work(
             )
         elif inpainting_method == "opencv" or inpainter is None:
             inpainter = None
-            log_message("Using OpenCV simple fill for inpainting", verbose=verbose)
+            log_message(
+                "Using OpenCV texture inpainting (flat fill only for genuinely "
+                "solid-color backgrounds)",
+                verbose=verbose,
+            )
         current_image = pil_image
         temp_files = []
         none_skipped_clip_bboxes = set()
@@ -1007,15 +1015,31 @@ def finish_outside_text_work(
                             candidate = result["candidate"]
                             if result["error"] is not None:
                                 fallback_color_to_use = candidate["fallback_color"]
-                                log_message(
-                                    f"Flux failed for OSB region {candidate['index']}"
-                                    f" (Flux inpainting error: {result['error']}); "
-                                    f"falling back to CV2 fill ({fallback_color_to_use})",
-                                    always_print=True,
+                                texture_result = opencv_texture_inpaint(
+                                    current_image,
+                                    candidate["mask"],
+                                    method="telea",
+                                    verbose=verbose,
                                 )
-                                current_image = apply_candidate_simple_fill(
-                                    candidate, fallback_color_to_use
-                                )
+                                if texture_result is current_image:
+                                    log_message(
+                                        f"Flux failed for OSB region {candidate['index']}"
+                                        f" (Flux inpainting error: {result['error']}); "
+                                        f"OpenCV texture inpaint also unavailable, "
+                                        f"falling back to CV2 fill ({fallback_color_to_use})",
+                                        always_print=True,
+                                    )
+                                    current_image = apply_candidate_simple_fill(
+                                        candidate, fallback_color_to_use
+                                    )
+                                else:
+                                    log_message(
+                                        f"Flux failed for OSB region {candidate['index']}"
+                                        f" (Flux inpainting error: {result['error']}); "
+                                        "falling back to OpenCV texture inpaint",
+                                        always_print=True,
+                                    )
+                                    current_image = texture_result
                                 cv2_inpaints += 1
                                 continue
 
@@ -1064,6 +1088,7 @@ def finish_outside_text_work(
                     composite_clip_bbox = None
                     fill_color = None
                     fallback_fill_color = None
+                    texture_inpaint_bbox = None
                     ox0 = oy0 = ox1 = oy1 = None
                     if original_bbox_dict:
                         ox = int(original_bbox_dict.get("x", 0))
@@ -1378,26 +1403,31 @@ def finish_outside_text_work(
                                                 ):
                                                     expanded_is_solid = True
 
-                                    should_simple_fill = expanded_is_solid or force_fill
+                                    # Only use a flat color fill when the region is a
+                                    # genuinely solid-color background (detected via the
+                                    # border sampling above). "opencv" method regions that
+                                    # are NOT solid go through real texture inpainting
+                                    # (cv2.inpaint) below instead of a flat rectangle, so
+                                    # OSB text over artwork doesn't get covered by a box.
+                                    should_simple_fill = expanded_is_solid
 
                                     if should_simple_fill:
                                         fill_color = fallback_fill_color
-
-                                        if force_fill and not (
-                                            white_ratio >= ratio_threshold
-                                            or black_ratio >= ratio_threshold
-                                        ):
-                                            log_message(
-                                                "Forcing CV2 fill: defaulting to "
-                                                f"{'white' if fill_color == (255, 255, 255) else 'black'} background",
-                                                verbose=verbose,
-                                            )
-                                        else:
-                                            log_message(
-                                                "Skipping Flux for OSB region: detected pure "
-                                                f"{'white' if fill_color == (255, 255, 255) else 'black'} background",
-                                                verbose=verbose,
-                                            )
+                                        log_message(
+                                            "Flat fill: detected pure "
+                                            f"{'white' if fill_color == (255, 255, 255) else 'black'} background",
+                                            verbose=verbose,
+                                        )
+                                    elif force_fill:
+                                        # inpainting_method == "opencv" and the background
+                                        # isn't solid: erase the original text with real
+                                        # texture-aware inpainting instead of a flat box.
+                                        texture_inpaint_bbox = (p_x0, p_y0, p_x1, p_y1)
+                                        log_message(
+                                            "Using OpenCV texture inpainting (TELEA) for "
+                                            "non-solid OSB background",
+                                            verbose=verbose,
+                                        )
 
                     def apply_simple_fill(color_to_use):
                         new_img = current_image.copy()
@@ -1488,6 +1518,18 @@ def finish_outside_text_work(
                     if fill_color is not None:
                         flush_pending_flux_candidates()
                         current_image = apply_simple_fill(fill_color)
+                        cv2_inpaints += 1
+                        continue
+
+                    if texture_inpaint_bbox is not None:
+                        flush_pending_flux_candidates()
+                        current_image = opencv_texture_inpaint(
+                            current_image,
+                            combined_mask,
+                            method="telea",
+                            bbox=texture_inpaint_bbox,
+                            verbose=verbose,
+                        )
                         cv2_inpaints += 1
                         continue
 
@@ -1601,13 +1643,37 @@ def finish_outside_text_work(
                             if fallback_fill_color
                             else (255, 255, 255)
                         )
-                        log_message(
-                            f"Flux failed for OSB region {i + 1}"
-                            + (f" ({flux_fail_reason})" if flux_fail_reason else "")
-                            + f"; falling back to CV2 fill ({fallback_color_to_use})",
-                            always_print=True,
+                        texture_result = opencv_texture_inpaint(
+                            current_image,
+                            combined_mask,
+                            method="telea",
+                            verbose=verbose,
                         )
-                        current_image = apply_simple_fill(fallback_color_to_use)
+                        if texture_result is current_image:
+                            log_message(
+                                f"Flux failed for OSB region {i + 1}"
+                                + (
+                                    f" ({flux_fail_reason})"
+                                    if flux_fail_reason
+                                    else ""
+                                )
+                                + f"; OpenCV texture inpaint also unavailable, "
+                                f"falling back to CV2 fill ({fallback_color_to_use})",
+                                always_print=True,
+                            )
+                            current_image = apply_simple_fill(fallback_color_to_use)
+                        else:
+                            log_message(
+                                f"Flux failed for OSB region {i + 1}"
+                                + (
+                                    f" ({flux_fail_reason})"
+                                    if flux_fail_reason
+                                    else ""
+                                )
+                                + "; falling back to OpenCV texture inpaint",
+                                always_print=True,
+                            )
+                            current_image = texture_result
                         cv2_inpaints += 1
                         continue
 
@@ -1690,22 +1756,31 @@ def finish_outside_text_work(
                         except Exception as e:
                             log_message(
                                 "Grouped Flux inpainting failed "
-                                f"({e}); falling back to CV2 fill",
+                                f"({e}); falling back to OpenCV texture inpaint",
                                 always_print=True,
                             )
                             for candidate in grouped_flux_candidates:
-                                mask_pil = Image.fromarray(
-                                    (candidate["mask"] * 255).astype(np.uint8),
-                                    mode="L",
+                                texture_result = opencv_texture_inpaint(
+                                    current_image,
+                                    candidate["mask"],
+                                    method="telea",
+                                    verbose=verbose,
                                 )
-                                patch = Image.new(
-                                    "RGB",
-                                    current_image.size,
-                                    candidate["fallback_color"],
-                                )
-                                next_image = current_image.copy()
-                                next_image.paste(patch, (0, 0), mask=mask_pil)
-                                current_image = next_image
+                                if texture_result is current_image:
+                                    mask_pil = Image.fromarray(
+                                        (candidate["mask"] * 255).astype(np.uint8),
+                                        mode="L",
+                                    )
+                                    patch = Image.new(
+                                        "RGB",
+                                        current_image.size,
+                                        candidate["fallback_color"],
+                                    )
+                                    next_image = current_image.copy()
+                                    next_image.paste(patch, (0, 0), mask=mask_pil)
+                                    current_image = next_image
+                                else:
+                                    current_image = texture_result
                             cv2_inpaints += len(grouped_flux_candidates)
 
                 log_message("Outside text inpainting completed", verbose=verbose)
