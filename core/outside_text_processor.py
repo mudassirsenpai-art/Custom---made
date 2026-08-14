@@ -1322,7 +1322,7 @@ def finish_outside_text_work(
                                             else (0, 0, 0)
                                         )
 
-                                    force_fill = inpainting_method == "opencv"
+                                    force_fill = inpainting_method in ("opencv", "lama")
 
                                     # Get expanded bounds for this group to check solid color and for cv2 fill
                                     p_x0, p_y0, p_x1, p_y1 = ox, oy, ox + ow, oy + oh
@@ -1373,7 +1373,7 @@ def finish_outside_text_work(
                                             ),
                                         )
 
-                                    force_fill = inpainting_method == "opencv"
+                                    force_fill = inpainting_method in ("opencv", "lama")
 
                                     # Simply check if the expanded boundary is solid color
                                     expanded_is_solid = False
@@ -1423,9 +1423,9 @@ def finish_outside_text_work(
 
                                     # Only use a flat color fill when the region is a
                                     # genuinely solid-color background (detected via the
-                                    # border sampling above). "opencv" method regions that
-                                    # are NOT solid go through real texture inpainting
-                                    # (cv2.inpaint) below instead of a flat rectangle, so
+                                    # border sampling above). "opencv"/"lama" method
+                                    # regions that are NOT solid go through real texture
+                                    # inpainting below instead of a flat rectangle, so
                                     # OSB text over artwork doesn't get covered by a box.
                                     should_simple_fill = expanded_is_solid
 
@@ -1437,13 +1437,14 @@ def finish_outside_text_work(
                                             verbose=verbose,
                                         )
                                     elif force_fill:
-                                        # inpainting_method == "opencv" and the background
-                                        # isn't solid: erase the original text with real
-                                        # texture-aware inpainting instead of a flat box.
+                                        # inpainting_method in (opencv, lama) and the
+                                        # background isn't solid: erase the original text
+                                        # with real texture-aware inpainting (LaMa, or
+                                        # OpenCV as its fallback) instead of a flat box.
                                         texture_inpaint_bbox = (p_x0, p_y0, p_x1, p_y1)
                                         log_message(
-                                            "Using OpenCV texture inpainting (TELEA) for "
-                                            "non-solid OSB background",
+                                            "Using texture inpainting for non-solid OSB "
+                                            "background",
                                             verbose=verbose,
                                         )
 
