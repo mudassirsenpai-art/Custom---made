@@ -4,7 +4,7 @@ from typing import Dict, Optional, Tuple
 import cv2
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageFilter
 from scipy.ndimage import distance_transform_edt
 
 from core.caching import get_cache
@@ -31,9 +31,9 @@ CONTEXT_PADDING_RATIO = 0.5  # Context padding is 50% of detection size
 MAX_CONTEXT_PADDING = 80  # Context padding capped at 80 pixels
 
 # OpenCV texture-inpainting parameters (lightweight, no-GPU fallback / "opencv" method)
-CV2_INPAINT_RADIUS = 5  # Radius of circular neighborhood used by cv2.inpaint
-CV2_MASK_DILATE_PX = 3  # Grow the OCR mask slightly so glyph edges/anti-aliasing are fully erased
-CV2_INPAINT_CONTEXT_PADDING = 16  # Extra border of real pixels fed to cv2.inpaint for better texture context
+CV2_INPAINT_RADIUS = 9  # Radius of circular neighborhood used by cv2.inpaint (larger = smoother texture continuity, less streaking on halftone/gradient backgrounds)
+CV2_MASK_DILATE_PX = 4  # Grow the OCR mask slightly so glyph edges/anti-aliasing are fully erased
+CV2_INPAINT_CONTEXT_PADDING = 32  # Extra border of real pixels fed to cv2.inpaint for better texture context
 
 
 def opencv_texture_inpaint(
@@ -117,7 +117,19 @@ def opencv_texture_inpaint(
         local_mask_u8 = cv2.dilate(local_mask_u8, kernel, iterations=1)
 
     try:
-        inpainted_bgr = cv2.inpaint(crop_bgr, local_mask_u8, radius, flag)
+        # Run both algorithms and blend: Telea preserves edges/structure better,
+        # NS handles smooth gradients/halftone better. Blending avoids the harsh
+        # directional streaking either produces alone on complex manga textures.
+        inpainted_telea = cv2.inpaint(crop_bgr, local_mask_u8, radius, cv2.INPAINT_TELEA)
+        inpainted_ns = cv2.inpaint(crop_bgr, local_mask_u8, radius, cv2.INPAINT_NS)
+        inpainted_bgr = cv2.addWeighted(inpainted_telea, 0.5, inpainted_ns, 0.5, 0)
+
+        # Light median blur restricted to the masked area only: removes residual
+        # streak/noise artifacts from the inpaint fill without softening real
+        # artwork outside the mask.
+        smoothed = cv2.medianBlur(inpainted_bgr, 5)
+        mask_3ch = cv2.cvtColor(local_mask_u8, cv2.COLOR_GRAY2BGR).astype(bool)
+        inpainted_bgr = np.where(mask_3ch, smoothed, inpainted_bgr)
     except Exception as e:
         log_message(
             f"cv2.inpaint failed ({e}); returning original crop unchanged",
@@ -131,7 +143,11 @@ def opencv_texture_inpaint(
     result = pil_image.copy()
     # Paste only the (dilated) masked pixels back, so any anti-aliasing at the
     # crop boundary from cv2.inpaint never bleeds into untouched artwork.
-    paste_mask_pil = Image.fromarray(local_mask_u8, mode="L")
+    # Feather the paste mask edge by 1-2px so the inpaint patch blends into
+    # surrounding art instead of leaving a visible hard seam/outline.
+    paste_mask_pil = Image.fromarray(local_mask_u8, mode="L").filter(
+        ImageFilter.GaussianBlur(radius=1.2)
+    )
     result.paste(inpainted_crop_pil, (cx1, cy1), mask=paste_mask_pil)
 
     log_message(
@@ -139,6 +155,169 @@ def opencv_texture_inpaint(
         verbose=verbose,
     )
     return result
+
+
+# LaMa (Large Mask Inpainting) parameters — lightweight CNN inpainter, usable
+# speed on CPU (no GPU required), much better texture quality than OpenCV on
+# complex manga backgrounds (halftone, gradients, screentones) and far faster
+# than Flux diffusion. This is the recommended "opencv"-tier replacement when
+# no GPU is available.
+LAMA_MASK_DILATE_PX = 4  # Grow the OCR mask slightly so glyph edges/anti-aliasing are fully erased
+LAMA_CONTEXT_PADDING = 32  # Extra border of real pixels fed to LaMa for texture context
+LAMA_PAD_MULTIPLE = 8  # LaMa's conv stack requires H/W divisible by 8
+
+
+def _lama_pad_to_multiple(image_np: np.ndarray, multiple: int = LAMA_PAD_MULTIPLE):
+    """Reflect-pad an HxWxC (or HxW) array so H and W are divisible by `multiple`."""
+    h, w = image_np.shape[:2]
+    pad_h = (multiple - h % multiple) % multiple
+    pad_w = (multiple - w % multiple) % multiple
+    if image_np.ndim == 3:
+        padded = np.pad(image_np, ((0, pad_h), (0, pad_w), (0, 0)), mode="reflect")
+    else:
+        padded = np.pad(image_np, ((0, pad_h), (0, pad_w)), mode="reflect")
+    return padded, h, w
+
+
+def lama_inpaint(
+    pil_image: "Image.Image",
+    mask_np: np.ndarray,
+    bbox: Optional[Tuple[int, int, int, int]] = None,
+    dilate_px: int = LAMA_MASK_DILATE_PX,
+    context_padding: int = LAMA_CONTEXT_PADDING,
+    verbose: bool = False,
+) -> "Image.Image":
+    """
+    Texture-aware OSB/SFX text removal using the LaMa (Large Mask Inpainting)
+    model. LaMa is a fast, CPU-friendly CNN — no diffusion sampling loop like
+    Flux — so it stays usable without a GPU while giving much cleaner results
+    than classic cv2.inpaint on manga screentones/gradients/complex art.
+
+    Falls back silently by raising; caller (finish_outside_text_work) is
+    expected to catch and fall back to opencv_texture_inpaint on any failure.
+
+    Args:
+        pil_image: Full-page PIL image (RGB) to inpaint.
+        mask_np: Boolean (or 0/255) array, same H/W as pil_image, True/255
+            where the original text pixels are and should be erased.
+        bbox: Optional (x1, y1, x2, y2) of the text region. When given, only a
+            padded crop around it is run through LaMa (much faster on large
+            pages); the result is pasted back using the mask.
+        dilate_px: How many pixels to grow the mask by before inpainting.
+        context_padding: Extra pixels of real artwork included around bbox.
+        verbose: Enable debug logging.
+
+    Returns:
+        A new PIL.Image with the masked text pixels erased and the
+        surrounding artwork reconstructed. If nothing needs inpainting (empty
+        mask) the original image is returned unchanged.
+    """
+    if pil_image is None:
+        return pil_image
+
+    img_w, img_h = pil_image.size
+    mask_bool = mask_np.astype(bool)
+    if not np.any(mask_bool):
+        return pil_image
+
+    if bbox is not None:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        cx1 = max(0, x1 - context_padding)
+        cy1 = max(0, y1 - context_padding)
+        cx2 = min(img_w, x2 + context_padding)
+        cy2 = min(img_h, y2 + context_padding)
+    else:
+        ys, xs = np.where(mask_bool)
+        if ys.size == 0:
+            return pil_image
+        cx1 = max(0, int(xs.min()) - context_padding)
+        cy1 = max(0, int(ys.min()) - context_padding)
+        cx2 = min(img_w, int(xs.max()) + 1 + context_padding)
+        cy2 = min(img_h, int(ys.max()) + 1 + context_padding)
+
+    if cx2 <= cx1 or cy2 <= cy1:
+        return pil_image
+
+    crop_pil = pil_image.crop((cx1, cy1, cx2, cy2)).convert("RGB")
+    crop_np = np.array(crop_pil)
+
+    local_mask = mask_bool[cy1:cy2, cx1:cx2]
+    if not np.any(local_mask):
+        return pil_image
+
+    local_mask_u8 = (local_mask.astype(np.uint8)) * 255
+    if dilate_px > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (dilate_px * 2 + 1, dilate_px * 2 + 1)
+        )
+        local_mask_u8 = cv2.dilate(local_mask_u8, kernel, iterations=1)
+
+    model_manager = get_model_manager()
+    model = model_manager.load_lama(verbose=verbose)
+    device = model_manager.device
+
+    # Pad crop + mask so dimensions are divisible by 8 (LaMa conv requirement)
+    padded_img, orig_h, orig_w = _lama_pad_to_multiple(crop_np)
+    padded_mask, _, _ = _lama_pad_to_multiple(local_mask_u8)
+
+    img_tensor = (
+        torch.from_numpy(padded_img).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+    )
+    mask_tensor = (
+        torch.from_numpy(padded_mask).float().unsqueeze(0).unsqueeze(0) / 255.0
+    )
+    mask_tensor = (mask_tensor > 0.5).float()
+
+    img_tensor = img_tensor.to(device)
+    mask_tensor = mask_tensor.to(device)
+
+    with torch.inference_mode():
+        result_tensor = model(img_tensor, mask_tensor)
+
+    result_np = result_tensor[0].permute(1, 2, 0).cpu().numpy()
+    result_np = np.clip(result_np * 255, 0, 255).astype(np.uint8)
+    # Crop back off the reflect-padding
+    result_np = result_np[:orig_h, :orig_w]
+
+    inpainted_crop_pil = Image.fromarray(result_np)
+
+    result = pil_image.copy()
+    # Feather the paste mask edge so the LaMa patch blends into surrounding
+    # art instead of leaving a visible hard seam/outline.
+    paste_mask_pil = Image.fromarray(local_mask_u8, mode="L").filter(
+        ImageFilter.GaussianBlur(radius=1.2)
+    )
+    result.paste(inpainted_crop_pil, (cx1, cy1), mask=paste_mask_pil)
+
+    log_message(
+        f"LaMa inpaint applied to {cx2 - cx1}x{cy2 - cy1} region",
+        verbose=verbose,
+    )
+    return result
+
+
+def lama_or_opencv_inpaint(
+    pil_image: "Image.Image",
+    mask_np: np.ndarray,
+    bbox: Optional[Tuple[int, int, int, int]] = None,
+    verbose: bool = False,
+) -> "Image.Image":
+    """
+    Try LaMa first (better quality, CPU-friendly); if it fails for any reason
+    (model download failure, OOM, runtime error, unsupported device, etc.)
+    silently fall back to the classic OpenCV texture inpaint so the pipeline
+    never hard-fails on this step.
+    """
+    try:
+        return lama_inpaint(pil_image, mask_np, bbox=bbox, verbose=verbose)
+    except Exception as e:
+        log_message(
+            f"LaMa inpaint failed ({e}); falling back to OpenCV texture inpaint",
+            always_print=True,
+        )
+        return opencv_texture_inpaint(
+            pil_image, mask_np, method="telea", bbox=bbox, verbose=verbose
+        )
 
 
 def _prompt_value_to_cpu(value):
