@@ -377,7 +377,16 @@ def _render_from_manual_checkpoint(
             bubble_color_bgr = (50, 50, 50) if is_dark_text else (255, 255, 255)
             rotation_deg = 0.0
             vertical_stack = False
-            if bubble.get("needs_text_background"):
+            # Solid text-background boxes are reserved for genuinely
+            # un-inpainted OSB regions (inpainting_method == "none", where the
+            # original pixels are still underneath). When real inpainting ran
+            # (Flux or OpenCV texture inpaint), the art has already been
+            # erased/reconstructed, so OSB/SFX text renders with only its
+            # outline stroke for readability instead of a box that covers art.
+            if (
+                bubble.get("needs_text_background")
+                and config.outside_text.inpainting_method == "none"
+            ):
                 if text_color_rgb:
                     lum = (
                         0.299 * text_color_rgb[0]
@@ -2331,7 +2340,12 @@ def translate_and_render(
                             vertical_stack = False
 
                             text_bg_rgb = None
-                            if bubble.get("needs_text_background"):
+                            # Same rule as the first render pass above: only
+                            # box OSB/SFX text when nothing was inpainted.
+                            if (
+                                bubble.get("needs_text_background")
+                                and config.outside_text.inpainting_method == "none"
+                            ):
                                 if text_color_rgb:
                                     lum = (
                                         0.299 * text_color_rgb[0]
