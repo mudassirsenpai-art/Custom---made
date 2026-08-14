@@ -23,6 +23,7 @@ from core.image.image_utils import cv2_to_pil, pil_to_cv2, process_bubble_image_
 from core.image.inpainting import (
     FluxKleinInpainter,
     FluxKontextInpainter,
+    lama_or_opencv_inpaint,
     opencv_texture_inpaint,
 )
 from core.image.ocr_detection import OutsideTextDetector, extract_text_with_manga_ocr
@@ -748,6 +749,18 @@ def finish_outside_text_work(
         # Create inpainter based on selected method
         inpainting_method = config.outside_text.inpainting_method
         inpainter = None
+
+        def run_texture_inpaint(image, mask, bbox=None):
+            """Route non-Flux texture inpainting through LaMa (with automatic
+            OpenCV fallback on failure) when 'lama' is selected, otherwise use
+            classic OpenCV directly. Used for both the primary opencv/lama
+            method and as the fallback when Flux fails/is unavailable."""
+            if inpainting_method == "lama":
+                return lama_or_opencv_inpaint(image, mask, bbox=bbox, verbose=verbose)
+            return opencv_texture_inpaint(
+                image, mask, method="telea", bbox=bbox, verbose=verbose
+            )
+
         if inpainting_method == "flux_klein_9b":
             try:
                 backend = config.outside_text.flux_backend
@@ -842,13 +855,20 @@ def finish_outside_text_work(
                 "Using text background mode (no inpainting for non-solid regions)",
                 verbose=verbose,
             )
-        elif inpainting_method == "opencv" or inpainter is None:
+        elif inpainting_method == "lama" or inpainting_method == "opencv" or inpainter is None:
             inpainter = None
-            log_message(
-                "Using OpenCV texture inpainting (flat fill only for genuinely "
-                "solid-color backgrounds)",
-                verbose=verbose,
-            )
+            if inpainting_method == "lama":
+                log_message(
+                    "Using LaMa inpainting (CPU-friendly; falls back to OpenCV "
+                    "texture inpaint automatically if LaMa fails)",
+                    verbose=verbose,
+                )
+            else:
+                log_message(
+                    "Using OpenCV texture inpainting (flat fill only for genuinely "
+                    "solid-color backgrounds)",
+                    verbose=verbose,
+                )
         current_image = pil_image
         temp_files = []
         none_skipped_clip_bboxes = set()
@@ -1015,11 +1035,9 @@ def finish_outside_text_work(
                             candidate = result["candidate"]
                             if result["error"] is not None:
                                 fallback_color_to_use = candidate["fallback_color"]
-                                texture_result = opencv_texture_inpaint(
+                                texture_result = run_texture_inpaint(
                                     current_image,
                                     candidate["mask"],
-                                    method="telea",
-                                    verbose=verbose,
                                 )
                                 if texture_result is current_image:
                                     log_message(
@@ -1523,12 +1541,10 @@ def finish_outside_text_work(
 
                     if texture_inpaint_bbox is not None:
                         flush_pending_flux_candidates()
-                        current_image = opencv_texture_inpaint(
+                        current_image = run_texture_inpaint(
                             current_image,
                             combined_mask,
-                            method="telea",
                             bbox=texture_inpaint_bbox,
-                            verbose=verbose,
                         )
                         cv2_inpaints += 1
                         continue
@@ -1643,11 +1659,9 @@ def finish_outside_text_work(
                             if fallback_fill_color
                             else (255, 255, 255)
                         )
-                        texture_result = opencv_texture_inpaint(
+                        texture_result = run_texture_inpaint(
                             current_image,
                             combined_mask,
-                            method="telea",
-                            verbose=verbose,
                         )
                         if texture_result is current_image:
                             log_message(
@@ -1760,11 +1774,9 @@ def finish_outside_text_work(
                                 always_print=True,
                             )
                             for candidate in grouped_flux_candidates:
-                                texture_result = opencv_texture_inpaint(
+                                texture_result = run_texture_inpaint(
                                     current_image,
                                     candidate["mask"],
-                                    method="telea",
-                                    verbose=verbose,
                                 )
                                 if texture_result is current_image:
                                     mask_pil = Image.fromarray(
