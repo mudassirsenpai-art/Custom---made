@@ -169,7 +169,7 @@ class ModelManager:
                 "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors"
             ),
             ModelType.LAMA: (
-                "https://huggingface.co/Sanster/models/resolve/main/big-lama.pt"
+                "https://huggingface.co/smartywu/big-lama/resolve/main/big-lama.pt"
             ),
             ModelType.FLUX_KLEIN_SDCPP_VAE: (
                 "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/"
@@ -197,7 +197,7 @@ class ModelManager:
                 "filename": "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors",
             },
             ModelType.LAMA: {
-                "repo_id": "Sanster/models",
+                "repo_id": "smartywu/big-lama",
                 "filename": "big-lama.pt",
             },
             ModelType.YOLO_SPEECH_BUBBLE: {
