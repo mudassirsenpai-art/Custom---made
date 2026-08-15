@@ -34,6 +34,7 @@ class ModelType(Enum):
     UPSCALE = "upscale"
     UPSCALE_LITE = "upscale_lite"
     LAMA = "lama"
+    LAMA_LARGE = "lama_large"
     YOLO_SPEECH_BUBBLE = "yolo_speech_bubble"
     YOLO_SPEECH_BUBBLE_2 = "yolo_speech_bubble_2"
     YOLO_SPEECH_BUBBLE_3 = "yolo_speech_bubble_3"
@@ -124,6 +125,9 @@ class ModelManager:
                 model_dir / "upscale" / "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors"
             ),
             ModelType.LAMA: (model_dir / "lama" / "big-lama.pt"),
+            ModelType.LAMA_LARGE: (
+                model_dir / "lama" / "anime-manga-big-lama.pt"
+            ),
             ModelType.YOLO_SPEECH_BUBBLE: (
                 model_dir / "yolo" / "yolov8m_seg-speech-bubble.pt"
             ),
@@ -171,6 +175,10 @@ class ModelManager:
             ModelType.LAMA: (
                 "https://huggingface.co/fashn-ai/LaMa/resolve/main/big-lama.pt"
             ),
+            ModelType.LAMA_LARGE: (
+                "https://huggingface.co/zyddnys/manga-image-translator/resolve/main/"
+                "anime-manga-big-lama.pt"
+            ),
             ModelType.FLUX_KLEIN_SDCPP_VAE: (
                 "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/"
                 "split_files/vae/flux2-vae.safetensors"
@@ -199,6 +207,10 @@ class ModelManager:
             ModelType.LAMA: {
                 "repo_id": "fashn-ai/LaMa",
                 "filename": "big-lama.pt",
+            },
+            ModelType.LAMA_LARGE: {
+                "repo_id": "zyddnys/manga-image-translator",
+                "filename": "anime-manga-big-lama.pt",
             },
             ModelType.YOLO_SPEECH_BUBBLE: {
                 "repo_id": "kitsumed/yolov8m_seg-speech-bubble",
@@ -759,6 +771,38 @@ class ModelManager:
             model.eval()
             self.models[ModelType.LAMA] = model
             log_message("LaMa model loaded.", verbose=verbose)
+            return model
+
+    def load_lama_large(self, verbose: bool = False):
+        """Load the LaMa-Large ("anime-manga-big-lama") JIT-traced model.
+
+        This is an additional, higher-capacity LaMa checkpoint (sourced from
+        the manga-image-translator project's `lama_large` inpainter) kept
+        alongside the default `load_lama()` model rather than replacing it.
+        Same TorchScript format and calling convention as regular LaMa, so it
+        can be swapped in per-call without any other pipeline changes.
+        """
+        with self._lock:
+            if self.is_loaded(ModelType.LAMA_LARGE):
+                return self.models[ModelType.LAMA_LARGE]
+
+            log_message("Loading LaMa-Large inpainting model...", verbose=verbose)
+            path = self.model_paths[ModelType.LAMA_LARGE]
+
+            try:
+                hf_info = self.model_hf_repos[ModelType.LAMA_LARGE]
+                self._ensure_hf_file(
+                    hf_info["repo_id"], hf_info["filename"], path, verbose=verbose
+                )
+            except Exception:
+                self._ensure_file(
+                    path, self.model_urls[ModelType.LAMA_LARGE], verbose=verbose
+                )
+
+            model = torch.jit.load(str(path), map_location=self.device)
+            model.eval()
+            self.models[ModelType.LAMA_LARGE] = model
+            log_message("LaMa-Large model loaded.", verbose=verbose)
             return model
 
     def _resolve_speech_bubble_model_type(self, model_path: Optional[str]) -> ModelType:
