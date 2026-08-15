@@ -186,6 +186,7 @@ def lama_inpaint(
     dilate_px: int = LAMA_MASK_DILATE_PX,
     context_padding: int = LAMA_CONTEXT_PADDING,
     verbose: bool = False,
+    use_large: bool = False,
 ) -> "Image.Image":
     """
     Texture-aware OSB/SFX text removal using the LaMa (Large Mask Inpainting)
@@ -206,6 +207,10 @@ def lama_inpaint(
         dilate_px: How many pixels to grow the mask by before inpainting.
         context_padding: Extra pixels of real artwork included around bbox.
         verbose: Enable debug logging.
+        use_large: If True, use the additional "LaMa-Large" checkpoint
+            (`load_lama_large`) instead of the default LaMa model. Same
+            TorchScript calling convention, just a separate/optional model —
+            the default LaMa model is untouched when this is False.
 
     Returns:
         A new PIL.Image with the masked text pixels erased and the
@@ -253,7 +258,11 @@ def lama_inpaint(
         local_mask_u8 = cv2.dilate(local_mask_u8, kernel, iterations=1)
 
     model_manager = get_model_manager()
-    model = model_manager.load_lama(verbose=verbose)
+    model = (
+        model_manager.load_lama_large(verbose=verbose)
+        if use_large
+        else model_manager.load_lama(verbose=verbose)
+    )
     device = model_manager.device
 
     # Pad crop + mask so dimensions are divisible by 8 (LaMa conv requirement)
@@ -301,15 +310,22 @@ def lama_or_opencv_inpaint(
     mask_np: np.ndarray,
     bbox: Optional[Tuple[int, int, int, int]] = None,
     verbose: bool = False,
+    use_large: bool = False,
 ) -> "Image.Image":
     """
     Try LaMa first (better quality, CPU-friendly); if it fails for any reason
     (model download failure, OOM, runtime error, unsupported device, etc.)
     silently fall back to the classic OpenCV texture inpaint so the pipeline
     never hard-fails on this step.
+
+    Args:
+        use_large: Pass through to `lama_inpaint` to use the additional
+            LaMa-Large checkpoint instead of the default LaMa model.
     """
     try:
-        return lama_inpaint(pil_image, mask_np, bbox=bbox, verbose=verbose)
+        return lama_inpaint(
+            pil_image, mask_np, bbox=bbox, verbose=verbose, use_large=use_large
+        )
     except Exception as e:
         log_message(
             f"LaMa inpaint failed ({e}); falling back to OpenCV texture inpaint",
