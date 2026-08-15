@@ -752,11 +752,16 @@ def finish_outside_text_work(
 
         def run_texture_inpaint(image, mask, bbox=None):
             """Route non-Flux texture inpainting through LaMa (with automatic
-            OpenCV fallback on failure) when 'lama' is selected, otherwise use
-            classic OpenCV directly. Used for both the primary opencv/lama
-            method and as the fallback when Flux fails/is unavailable."""
+            OpenCV fallback on failure) when 'lama'/'lama_large' is selected,
+            otherwise use classic OpenCV directly. Used for both the primary
+            opencv/lama method and as the fallback when Flux fails/is
+            unavailable."""
             if inpainting_method == "lama":
                 return lama_or_opencv_inpaint(image, mask, bbox=bbox, verbose=verbose)
+            if inpainting_method == "lama_large":
+                return lama_or_opencv_inpaint(
+                    image, mask, bbox=bbox, verbose=verbose, use_large=True
+                )
             return opencv_texture_inpaint(
                 image, mask, method="telea", bbox=bbox, verbose=verbose
             )
@@ -855,12 +860,23 @@ def finish_outside_text_work(
                 "Using text background mode (no inpainting for non-solid regions)",
                 verbose=verbose,
             )
-        elif inpainting_method == "lama" or inpainting_method == "opencv" or inpainter is None:
+        elif (
+            inpainting_method == "lama"
+            or inpainting_method == "lama_large"
+            or inpainting_method == "opencv"
+            or inpainter is None
+        ):
             inpainter = None
             if inpainting_method == "lama":
                 log_message(
                     "Using LaMa inpainting (CPU-friendly; falls back to OpenCV "
                     "texture inpaint automatically if LaMa fails)",
+                    verbose=verbose,
+                )
+            elif inpainting_method == "lama_large":
+                log_message(
+                    "Using LaMa-Large inpainting (higher-capacity checkpoint; "
+                    "falls back to OpenCV texture inpaint automatically if it fails)",
                     verbose=verbose,
                 )
             else:
@@ -1322,7 +1338,7 @@ def finish_outside_text_work(
                                             else (0, 0, 0)
                                         )
 
-                                    force_fill = inpainting_method in ("opencv", "lama")
+                                    force_fill = inpainting_method in ("opencv", "lama", "lama_large")
 
                                     # Get expanded bounds for this group to check solid color and for cv2 fill
                                     p_x0, p_y0, p_x1, p_y1 = ox, oy, ox + ow, oy + oh
@@ -1373,7 +1389,7 @@ def finish_outside_text_work(
                                             ),
                                         )
 
-                                    force_fill = inpainting_method in ("opencv", "lama")
+                                    force_fill = inpainting_method in ("opencv", "lama", "lama_large")
 
                                     # Simply check if the expanded boundary is solid color
                                     expanded_is_solid = False
