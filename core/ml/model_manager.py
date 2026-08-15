@@ -176,8 +176,8 @@ class ModelManager:
                 "https://huggingface.co/fashn-ai/LaMa/resolve/main/big-lama.pt"
             ),
             ModelType.LAMA_LARGE: (
-                "https://huggingface.co/zyddnys/manga-image-translator/resolve/main/"
-                "anime-manga-big-lama.pt"
+                "https://github.com/Sanster/models/releases/download/"
+                "AnimeMangaInpainting/anime-manga-big-lama.pt"
             ),
             ModelType.FLUX_KLEIN_SDCPP_VAE: (
                 "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/"
@@ -207,10 +207,6 @@ class ModelManager:
             ModelType.LAMA: {
                 "repo_id": "fashn-ai/LaMa",
                 "filename": "big-lama.pt",
-            },
-            ModelType.LAMA_LARGE: {
-                "repo_id": "zyddnys/manga-image-translator",
-                "filename": "anime-manga-big-lama.pt",
             },
             ModelType.YOLO_SPEECH_BUBBLE: {
                 "repo_id": "kitsumed/yolov8m_seg-speech-bubble",
@@ -789,15 +785,11 @@ class ModelManager:
             log_message("Loading LaMa-Large inpainting model...", verbose=verbose)
             path = self.model_paths[ModelType.LAMA_LARGE]
 
-            try:
-                hf_info = self.model_hf_repos[ModelType.LAMA_LARGE]
-                self._ensure_hf_file(
-                    hf_info["repo_id"], hf_info["filename"], path, verbose=verbose
-                )
-            except Exception:
-                self._ensure_file(
-                    path, self.model_urls[ModelType.LAMA_LARGE], verbose=verbose
-                )
+            # No HuggingFace mirror exists for this checkpoint; it's only
+            # published as a GitHub Release asset, so download directly.
+            self._ensure_file(
+                path, self.model_urls[ModelType.LAMA_LARGE], verbose=verbose
+            )
 
             model = torch.jit.load(str(path), map_location=self.device)
             model.eval()
