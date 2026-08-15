@@ -755,13 +755,20 @@ def finish_outside_text_work(
             OpenCV fallback on failure) when 'lama'/'lama_large' is selected,
             otherwise use classic OpenCV directly. Used for both the primary
             opencv/lama method and as the fallback when Flux fails/is
-            unavailable."""
+            unavailable.
+
+            Also tallies which method actually ran into `texture_method_counts`
+            (closure var) so the end-of-page summary log can report accurate
+            per-method counts instead of lumping everything under "CV2"."""
             if inpainting_method == "lama":
+                texture_method_counts["lama"] += 1
                 return lama_or_opencv_inpaint(image, mask, bbox=bbox, verbose=verbose)
             if inpainting_method == "lama_large":
+                texture_method_counts["lama_large"] += 1
                 return lama_or_opencv_inpaint(
                     image, mask, bbox=bbox, verbose=verbose, use_large=True
                 )
+            texture_method_counts["opencv"] += 1
             return opencv_texture_inpaint(
                 image, mask, method="telea", bbox=bbox, verbose=verbose
             )
@@ -900,6 +907,11 @@ def finish_outside_text_work(
                 flux_inpaints = 0
                 cv2_inpaints = 0
                 none_skips = 0
+                # Sub-breakdown of cv2_inpaints by which non-Flux method actually
+                # ran (run_texture_inpaint may route to LaMa/LaMa-Large/OpenCV
+                # depending on inpainting_method), purely for accurate summary
+                # logging below.
+                texture_method_counts = {"lama": 0, "lama_large": 0, "opencv": 0}
                 group_flux_regions = bool(config.outside_text.flux_group_regions)
                 grouped_flux_candidates = []
                 request_coordinator = getattr(config, "request_coordinator", None)
@@ -1813,10 +1825,27 @@ def finish_outside_text_work(
                             cv2_inpaints += len(grouped_flux_candidates)
 
                 log_message("Outside text inpainting completed", verbose=verbose)
-                parts = [
-                    f"Flux: {flux_inpaints}",
-                    f"CV2: {cv2_inpaints}",
-                ]
+                # cv2_inpaints is the total non-Flux count; break it down by
+                # which method actually ran (lama / lama_large / opencv) using
+                # the tally from run_texture_inpaint, since Flux-failure
+                # fallbacks and the primary opencv/lama path both funnel
+                # through cv2_inpaints.
+                parts = [f"Flux: {flux_inpaints}"]
+                if texture_method_counts["lama_large"]:
+                    parts.append(f"LaMa-Large: {texture_method_counts['lama_large']}")
+                if texture_method_counts["lama"]:
+                    parts.append(f"LaMa: {texture_method_counts['lama']}")
+                if texture_method_counts["opencv"]:
+                    parts.append(f"CV2: {texture_method_counts['opencv']}")
+                # Any remaining cv2_inpaints not accounted for by
+                # run_texture_inpaint (e.g. simple-fill fallback paths that
+                # bump cv2_inpaints directly) still get reported under CV2.
+                unaccounted = cv2_inpaints - sum(texture_method_counts.values())
+                if unaccounted > 0:
+                    if texture_method_counts["opencv"]:
+                        parts[-1] = f"CV2: {texture_method_counts['opencv'] + unaccounted}"
+                    else:
+                        parts.append(f"CV2: {unaccounted}")
                 if none_skips:
                     parts.append(f"Skipped (none): {none_skips}")
                 log_message(
