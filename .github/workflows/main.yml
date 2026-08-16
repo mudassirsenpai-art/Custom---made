@@ -1,7 +1,11 @@
 name: Extract Zip and Clean Repo
 
 on:
-  workflow_dispatch: # Manual trigger GitHub portal se
+  workflow_dispatch:
+
+# Fix 1: GitHub Actions Bot ko Write Permissions dena mandatory hai
+permissions:
+  contents: write
 
 jobs:
   clean-and-extract:
@@ -11,22 +15,19 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Step 1 - Remove Old Files (Except target zip)
+      - name: Step 1 - Remove Old Files (Except target zip and workflow)
         run: |
-          echo "Removing all repository contents except the zip file..."
-          # Zip file ko temporary safe jagah copy kar rahe hain
+          echo "Preserving zip and workflow file..."
           cp Custom---made-main.zip /tmp/Custom---made-main.zip
           
-          # Current repo ki saari files remove kar rahe hain
-          rm -rf *
-          rm -rf .github # Agar actions workflows re-create na ho, toh baki sab clean hoga
+          # Fix 2: Workflow folder (.github) delete hone se bachaya
+          find . -maxdepth 1 ! -name '.' ! -name '..' ! -name '.git' ! -name '.github' -exec rm -rf {} +
 
       - name: Step 2 - Extract Zip Content
         run: |
-          echo "Extracting zip file into repository root..."
+          echo "Extracting zip file..."
           unzip /tmp/Custom---made-main.zip -d .
           
-          # Agar zip ke andar koi extra root folder ban jaye toh content move karne ka safeguard:
           if [ -d "Custom---made-main" ]; then
             mv Custom---made-main/* . 2>/dev/null || true
             mv Custom---made-main/.* . 2>/dev/null || true
@@ -35,7 +36,6 @@ jobs:
 
       - name: Step 3 - Remove Zip File
         run: |
-          echo "Cleaning up temporary zip file..."
           rm -f /tmp/Custom---made-main.zip
           rm -f Custom---made-main.zip
 
@@ -45,4 +45,4 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
           git commit -m "Auto-clean, extract Custom---made-main.zip, and remove archive" || echo "No changes to commit"
-          git push origin main
+          git push origin HEAD:main
