@@ -1,0 +1,48 @@
+name: Extract Zip and Clean Repo
+
+on:
+  workflow_dispatch: # Manual trigger GitHub portal se
+
+jobs:
+  clean-and-extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Step 1 - Remove Old Files (Except target zip)
+        run: |
+          echo "Removing all repository contents except the zip file..."
+          # Zip file ko temporary safe jagah copy kar rahe hain
+          cp Custom---made-main.zip /tmp/Custom---made-main.zip
+          
+          # Current repo ki saari files remove kar rahe hain
+          rm -rf *
+          rm -rf .github # Agar actions workflows re-create na ho, toh baki sab clean hoga
+
+      - name: Step 2 - Extract Zip Content
+        run: |
+          echo "Extracting zip file into repository root..."
+          unzip /tmp/Custom---made-main.zip -d .
+          
+          # Agar zip ke andar koi extra root folder ban jaye toh content move karne ka safeguard:
+          if [ -d "Custom---made-main" ]; then
+            mv Custom---made-main/* . 2>/dev/null || true
+            mv Custom---made-main/.* . 2>/dev/null || true
+            rm -rf Custom---made-main
+          fi
+
+      - name: Step 3 - Remove Zip File
+        run: |
+          echo "Cleaning up temporary zip file..."
+          rm -f /tmp/Custom---made-main.zip
+          rm -f Custom---made-main.zip
+
+      - name: Step 4 - Commit and Push Changes back to Main Branch
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Auto-clean, extract Custom---made-main.zip, and remove archive" || echo "No changes to commit"
+          git push origin main
