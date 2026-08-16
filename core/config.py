@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -115,6 +115,26 @@ class RenderingConfig:
     detach_trailing_punctuation: bool = True
     auto_vertical_text: bool = False
 
+    # --- Copy the original lettering style ---
+    # When enabled, the fill colour, keyline colour and width, glow colour and
+    # radius, and font size of the *source* text are measured off the untouched
+    # page and reused for the translation. Anything that cannot be measured
+    # confidently keeps the value configured above, so a failed read degrades to
+    # ordinary rendering instead of to a wrong-looking page.
+    match_original_style: bool = False
+    # How much larger than the measured original the text may be set, as a
+    # fraction. The measured size becomes a ceiling, not a fixed size: the layout
+    # engine still shrinks text that no longer fits once translated.
+    match_original_style_tolerance: float = 0.25
+    # Measurements scoring below this confidence are discarded.
+    match_original_style_min_confidence: float = 0.35
+
+    # Per-region style values, normally filled in from the measurement above
+    # rather than configured by hand. None means "decide as usual".
+    outline_color_rgb: Optional[Tuple[int, int, int]] = None
+    glow_color_rgb: Optional[Tuple[int, int, int]] = None
+    glow_radius: float = 0.0
+
 
 @dataclass
 class OutsideTextConfig:
@@ -128,7 +148,7 @@ class OutsideTextConfig:
     seed: int = 1  # -1 = random
     huggingface_token: str = ""  # Required for Flux Kontext model downloads
     inpainting_method: str = (
-        "flux_klein_4b"  # flux_klein_9b, flux_klein_4b, flux_kontext, lama, opencv, none
+        "flux_klein_4b"  # flux_klein_9b, flux_klein_4b, flux_kontext, sdxl, lama, opencv, none
     )
     flux_backend: str = "sdnq"  # "sdcpp", "sdnq", "nunchaku" (Kontext only)
     flux_low_vram: bool = False  # Use CPU offload for SDNQ
@@ -142,6 +162,8 @@ class OutsideTextConfig:
     flux_upscale_small_crops: bool = True
     flux_group_regions: bool = False
     flux_residual_diff_threshold: float = 0.15
+    sdxl_guidance_scale: float = 6.5  # CFG strength for SDXL inpainting (lower = cleaner at low step counts)
+    sdxl_strength: float = 0.99  # Denoise strength within the OSB mask (0.99 = near-full art regen)
     osb_confidence: float = 0.6
     osb_model_variant: str = "manga"  # "manga" (default, deepghs YOLOv12) or "webtoon" (ogkalu YOLOv8, tuned for long-strip manhwa)
     osb_font_dir: Optional[str] = None  # None = use main font as fallback

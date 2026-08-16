@@ -56,6 +56,7 @@ from .services.translation import (
     prepare_bubble_images_for_translation,
 )
 from .text.placeholders import generate_test_placeholders
+from .text.style_extraction import extract_text_style, resolve_style_overrides
 from .text.text_processing import supports_long_word_breaking
 from .text.text_renderer import render_text_skia
 
@@ -142,7 +143,126 @@ def _clean_speech_bubbles_for_page(
         return fallback_cv_image.copy(), []
 
 
+def _attach_original_text_styles(
+    text_elements: List[Dict[str, Any]],
+    original_cv_image: np.ndarray,
+    *,
+    verbose: bool = False,
+) -> int:
+    """
+    Measure each text element's original lettering style and store it on the element.
+
+    This has to run before cleaning and inpainting, which are what destroy the
+    pixels being measured. Outside-bubble elements carry their own pre-inpaint
+    crop; speech bubbles are cropped straight out of the page, which is in the
+    same coordinate space as their bboxes.
+
+    The measurement is stored under `original_style` as a dict of plain scalars so
+    it survives the pickle round-trip that manual mode's checkpoint does - in Pass
+    2 the original pixels are long gone, and the stored read is the only copy.
+
+    Returns the number of elements a style could be measured for.
+    """
+    measured = 0
+    for element in text_elements or []:
+        element["original_style"] = None
+        try:
+            crop_pil = element.get("original_crop_pil")
+            if crop_pil is not None:
+                region = pil_to_cv2(crop_pil)
+            else:
+                bbox = element.get("bbox")
+                if not bbox or len(bbox) != 4:
+                    continue
+                x1, y1, x2, y2 = (int(round(float(v))) for v in bbox)
+                height, width = original_cv_image.shape[:2]
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(width, x2), min(height, y2)
+                if x2 - x1 < 2 or y2 - y1 < 2:
+                    continue
+                region = original_cv_image[y1:y2, x1:x2]
+
+            style = extract_text_style(
+                region,
+                verbose=verbose,
+                label=str(element.get("bbox")),
+            )
+            element["original_style"] = style
+            if style:
+                measured += 1
+        except Exception as e:
+            log_message(
+                f"Original-style probe failed for {element.get('bbox')}: {e}",
+                verbose=verbose,
+            )
+            element["original_style"] = None
+
+    return measured
+
+
+def _apply_original_style(
+    render_config: RenderingConfig,
+    style: Optional[Dict[str, Any]],
+    text_color_rgb: Optional[Tuple[int, int, int]],
+    *,
+    enabled: bool,
+    tolerance: float,
+    min_confidence: float,
+    label: str = "",
+    verbose: bool = False,
+) -> Tuple[RenderingConfig, Optional[Tuple[int, int, int]]]:
+    """
+    Fold a measured original style into the settings a region is about to render with.
+
+    Each attribute is independent: whatever was not measured confidently keeps the
+    value the caller configured, so a partial or failed read degrades to ordinary
+    rendering rather than to a half-copied look. The measured font size arrives as
+    a ceiling, so the layout engine can still shrink a longer translation to fit.
+
+    Returns the (mutated) config and the text colour to render with.
+    """
+    if not enabled or not style:
+        return render_config, text_color_rgb
+
+    overrides = resolve_style_overrides(
+        style,
+        base_min_font=render_config.min_font_size,
+        base_max_font=render_config.max_font_size,
+        tolerance=tolerance,
+        min_confidence=min_confidence,
+    )
+    if not overrides:
+        log_message(
+            f"Original style {label}: read too weak to copy, using defaults",
+            verbose=verbose,
+        )
+        return render_config, text_color_rgb
+
+    if overrides.max_font_size is not None:
+        render_config.max_font_size = overrides.max_font_size
+        # The binary search needs room below the ceiling it was just handed.
+        render_config.min_font_size = min(
+            render_config.min_font_size, overrides.max_font_size
+        )
+    if overrides.outline_width is not None:
+        render_config.outline_width = overrides.outline_width
+    if overrides.outline_color_rgb is not None:
+        render_config.outline_color_rgb = overrides.outline_color_rgb
+    if overrides.glow_color_rgb is not None and overrides.glow_radius:
+        render_config.glow_color_rgb = overrides.glow_color_rgb
+        render_config.glow_radius = overrides.glow_radius
+    if overrides.text_color_rgb is not None:
+        text_color_rgb = overrides.text_color_rgb
+
+    log_message(
+        f"Original style {label}: copied {overrides.summary()}",
+        verbose=verbose,
+    )
+    return render_config, text_color_rgb
+
+
 def compute_bubble_id(bbox, is_outside_text: bool = False, salt: str = "") -> str:
+
     """
     Build a stable identifier for a bubble/OSB text-element from its bbox.
 
@@ -451,6 +571,20 @@ def _render_from_manual_checkpoint(
             auto_vertical_text=(
                 False if is_outside_text else config.rendering.auto_vertical_text
             ),
+        )
+
+        # Style measured back in Pass 1, when the original text still existed.
+        # Checkpoints written before this feature simply have no entry, which
+        # lands on the defaults above.
+        render_config, text_color_rgb = _apply_original_style(
+            render_config,
+            bubble.get("original_style"),
+            text_color_rgb,
+            enabled=config.rendering.match_original_style,
+            tolerance=config.rendering.match_original_style_tolerance,
+            min_confidence=config.rendering.match_original_style_min_confidence,
+            label=str(bbox),
+            verbose=verbose,
         )
 
         success = False
@@ -1779,6 +1913,20 @@ def translate_and_render(
                 sorted_bubble_data = sort_bubbles_by_reading_order(
                     all_text_data, reading_direction, panels=panels
                 )
+
+                # Read the original lettering style off the untouched page, for
+                # both bubbles and outside text. This is the last point where
+                # those pixels still exist, and it is upstream of the manual
+                # checkpoint, so Pass 2 gets the measurement for free.
+                if config.rendering.match_original_style:
+                    measured = _attach_original_text_styles(
+                        sorted_bubble_data, original_cv_image, verbose=verbose
+                    )
+                    log_message(
+                        f"Original style: measured {measured}/{len(sorted_bubble_data)} "
+                        "text regions",
+                        verbose=verbose,
+                    )
                 if ENABLE_COMPONENT_ORDER_DEBUG:
                     bubble_debug_masks = {}
                     for bubble in sorted_bubble_data:
@@ -2432,6 +2580,21 @@ def translate_and_render(
                                 else config.rendering.auto_vertical_text
                             ),
                         )
+
+                        # Copy the original lettering, measured before cleaning.
+                        render_config, text_color_rgb = _apply_original_style(
+                            render_config,
+                            bubble.get("original_style"),
+                            text_color_rgb,
+                            enabled=config.rendering.match_original_style,
+                            tolerance=config.rendering.match_original_style_tolerance,
+                            min_confidence=(
+                                config.rendering.match_original_style_min_confidence
+                            ),
+                            label=str(bbox),
+                            verbose=verbose,
+                        )
+
                         success = False
                         if is_outside_text:
                             try:

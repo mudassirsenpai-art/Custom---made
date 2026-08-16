@@ -1282,6 +1282,484 @@ class FluxKontextInpainter:
         return composited_pil
 
 
+class SDXLInpainter:
+    """Inpainter using the SDXL 1.0 Inpainting model
+    (diffusers/stable-diffusion-xl-1.0-inpainting-0.1) for OSB text removal
+    and art regeneration.
+
+    Positioned between LaMa and Flux: noticeably better art regen quality
+    than LaMa (real diffusion sampling vs. a CNN texture-fill), while being
+    lighter/faster than Flux Kontext/Klein since SDXL is a much smaller
+    latent-diffusion model with a mature, highly-optimized diffusers path
+    (DPM++ Karras scheduler, SDPA/xformers attention, VAE slicing/tiling).
+    """
+
+    # SDXL's native resolution; inpainting quality degrades outside this
+    # neighborhood, so crops are scaled towards it before inference.
+    NATIVE_RESOLUTION = 1024
+    MIN_RESOLUTION = 256
+    MAX_RESOLUTION = 1536  # cap to keep inference fast on large panels
+    RESOLUTION_MULTIPLE = 8  # SDXL VAE downsample factor
+    SDXL_PADDING_MULTIPLIER = 1.5
+
+    SDXL_PROMPT = (
+        "manga panel artwork, hand-drawn black and white line art, "
+        "screentone shading, seamless continuation of the surrounding "
+        "background and character art, sharp clean linework, no text, "
+        "no letters, no watermark, high detail"
+    )
+    SDXL_NEGATIVE_PROMPT = (
+        "text, letters, watermark, signature, blurry, low quality, "
+        "jpeg artifacts, distorted anatomy, extra lines, noise, color, "
+        "smudge, out of frame"
+    )
+
+    def __init__(
+        self,
+        device: Optional[torch.device] = None,
+        num_inference_steps: int = 9,
+        guidance_scale: float = 6.5,
+        strength: float = 0.99,
+        low_vram: bool = False,
+        luminance_correction: bool = True,
+        upscale_small_crops: bool = True,
+        verbose: bool = False,
+    ):
+        """Initialize the SDXL Inpainter.
+
+        Args:
+            device: PyTorch device to use. Auto-detects if None.
+            num_inference_steps: Denoising steps. Default 9 (8-10 range) w/
+                DPM++2M Karras — fast, tuned for speed. Below ~8, detail/
+                sharpness starts dropping off noticeably; going up towards
+                15-20 buys back some fine-detail quality if speed allows.
+            guidance_scale: Classifier-free guidance strength. Lowered to
+                6.5 (from the model card's 7-8) to pair with the low step
+                count — high CFG + few steps tends to oversaturate/artifact,
+                so this keeps low-step output clean.
+            strength: Denoising strength within the mask (0.99 = near-full
+                regeneration, matching Flux's "regenerate the art" behavior).
+            low_vram: If True, use model CPU offload (slower, lower VRAM).
+            luminance_correction: If True, match patch luminance to
+                surrounding context (same technique as the Flux inpainters).
+            upscale_small_crops: If True, scale small crops up towards
+                SDXL's native 1024px before inference for sharper detail.
+            verbose: Whether to print verbose logging.
+        """
+        self.num_inference_steps = num_inference_steps
+        self.guidance_scale = guidance_scale
+        self.strength = strength
+        self.low_vram = low_vram
+        self.luminance_correction = luminance_correction
+        self.upscale_small_crops = upscale_small_crops
+        self.verbose = verbose
+
+        self.DEVICE = device if device is not None else get_best_device()
+        self.manager = get_model_manager()
+        self.cache = get_cache()
+        self.pipeline = None
+
+    def load_models(self):
+        """Load the SDXL inpainting pipeline via the model manager."""
+        if self.pipeline is not None:
+            return
+        self.pipeline = self.manager.load_sdxl_inpaint(
+            low_vram=self.low_vram, verbose=self.verbose
+        )
+
+    def unload_models(self):
+        """Unload the SDXL inpainting pipeline to free up memory."""
+        self.pipeline = None
+        self.manager.unload_sdxl_inpaint(verbose=self.verbose)
+
+    def _quantize_dimension(self, dim: int) -> int:
+        dim = max(self.MIN_RESOLUTION, min(self.MAX_RESOLUTION, dim))
+        return (dim // self.RESOLUTION_MULTIPLE) * self.RESOLUTION_MULTIPLE
+
+    def _expand_bounds_to_min_size(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        img_w: int,
+        img_h: int,
+    ) -> Tuple[int, int, int, int]:
+        target_w = min(self.MIN_RESOLUTION, img_w)
+        target_h = min(self.MIN_RESOLUTION, img_h)
+
+        width = x2 - x1
+        if width < target_w:
+            extra = target_w - width
+            x1 = max(0, x1 - extra // 2)
+            x2 = min(img_w, x2 + extra - extra // 2)
+            if x2 - x1 < target_w:
+                if x1 == 0:
+                    x2 = min(img_w, target_w)
+                else:
+                    x1 = max(0, img_w - target_w)
+
+        height = y2 - y1
+        if height < target_h:
+            extra = target_h - height
+            y1 = max(0, y1 - extra // 2)
+            y2 = min(img_h, y2 + extra - extra // 2)
+            if y2 - y1 < target_h:
+                if y1 == 0:
+                    y2 = min(img_h, target_h)
+                else:
+                    y1 = max(0, img_h - target_h)
+
+        return x1, y1, x2, y2
+
+    def _prepare_image_for_inference(
+        self, image_pil: Image.Image, verbose: bool = False
+    ) -> Tuple[Image.Image, int, int]:
+        """Scale the crop towards SDXL's native ~1024px resolution."""
+        orig_w, orig_h = image_pil.size
+        current_pixels = orig_w * orig_h
+
+        if current_pixels <= 0:
+            scale = 1.0
+        elif self.upscale_small_crops:
+            target_pixels = self.NATIVE_RESOLUTION * self.NATIVE_RESOLUTION
+            scale = math.sqrt(target_pixels / current_pixels)
+        else:
+            max_pixels = self.MAX_RESOLUTION * self.MAX_RESOLUTION
+            scale = (
+                math.sqrt(max_pixels / current_pixels)
+                if current_pixels > max_pixels
+                else 1.0
+            )
+
+        new_w = self._quantize_dimension(int(orig_w * scale))
+        new_h = self._quantize_dimension(int(orig_h * scale))
+
+        if (new_w, new_h) != (orig_w, orig_h):
+            log_message(
+                f"  - Scaling {orig_w}x{orig_h} -> {new_w}x{new_h} (SDXL native res)",
+                verbose=verbose,
+            )
+            image_pil = image_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        return image_pil, orig_w, orig_h
+
+    def _compute_luminance_stats(
+        self, image_np: np.ndarray, mask_np: np.ndarray
+    ) -> Tuple[float, float]:
+        if not np.any(mask_np):
+            return 127.5, 30.0
+        lab = cv2.cvtColor(image_np, cv2.COLOR_RGB2LAB)
+        l_values = lab[:, :, 0][mask_np].astype(np.float32)
+        return float(np.mean(l_values)), float(np.std(l_values)) + 1e-6
+
+    def _match_luminance(
+        self,
+        generated_pil: Image.Image,
+        original_crop_pil: Image.Image,
+        mask_crop_np: np.ndarray,
+        verbose: bool = False,
+    ) -> Image.Image:
+        """Match luminance/chroma of the generated patch to surrounding
+        context (same affine-correction approach used by the Flux inpainters,
+        so results look consistent regardless of which OSB method is active)."""
+        context_mask = ~mask_crop_np
+        if not np.any(context_mask) or not np.any(mask_crop_np):
+            return generated_pil
+
+        original_np = np.asarray(original_crop_pil)
+        generated_np = np.asarray(generated_pil).copy()
+
+        orig_mean, orig_std = self._compute_luminance_stats(original_np, context_mask)
+        gen_mean, gen_std = self._compute_luminance_stats(generated_np, context_mask)
+
+        if abs(orig_mean - gen_mean) < 1.3 and abs(orig_std - gen_std) < 2.0:
+            return generated_pil
+
+        scale = max(0.5, min(2.0, orig_std / gen_std))
+
+        log_message(
+            f"  - Luminance correction: mean {gen_mean:.1f}->{orig_mean:.1f}, "
+            f"std {gen_std:.1f}->{orig_std:.1f} (scale={scale:.2f})",
+            verbose=verbose,
+        )
+
+        lab = cv2.cvtColor(generated_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+        l_masked = lab[:, :, 0][mask_crop_np]
+        lab[:, :, 0][mask_crop_np] = np.clip(
+            (l_masked - gen_mean) * scale + orig_mean, 0, 255
+        )
+
+        orig_lab = cv2.cvtColor(original_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+        for ch in (1, 2):
+            orig_ch_mean = float(np.mean(orig_lab[:, :, ch][context_mask]))
+            gen_ch_mean = float(np.mean(lab[:, :, ch][context_mask]))
+            ch_shift = orig_ch_mean - gen_ch_mean
+            if abs(ch_shift) > 1.0:
+                lab[:, :, ch][mask_crop_np] = np.clip(
+                    lab[:, :, ch][mask_crop_np] + ch_shift, 0, 255
+                )
+
+        corrected_np = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+        return Image.fromarray(corrected_np)
+
+    def inpaint_mask(
+        self,
+        image_pil: Image.Image,
+        mask_np: np.ndarray,
+        seed: int = 1,
+        verbose: bool = False,
+        strict_mask_clipping: bool = False,
+        composite_clip_bbox: Optional[Tuple[int, int, int, int]] = None,
+        ocr_params: Optional[Dict] = None,
+    ) -> Image.Image:
+        """Inpaint a specific mask region in the image using SDXL Inpainting.
+
+        Mirrors FluxKleinInpainter.inpaint_mask's contract (crop -> context
+        padding -> inference -> feathered composite -> luminance match), so it
+        drops into the same OSB pipeline dispatch without further changes.
+        """
+        mask_np = np.asarray(mask_np)
+        if mask_np.dtype != bool:
+            mask_np = mask_np.astype(bool)
+
+        if not np.any(mask_np):
+            return image_pil
+
+        log_message("  - SDXL Inpainting...", verbose=verbose)
+
+        ys, xs = np.where(mask_np)
+        if len(ys) == 0 or len(xs) == 0:
+            return image_pil
+
+        x_min, x_max = int(xs.min()), int(xs.max())
+        y_min, y_max = int(ys.min()), int(ys.max())
+        bbox_width = x_max - x_min
+        bbox_height = y_max - y_min
+
+        padding_pixels = int(max(bbox_width, bbox_height) * CONTEXT_PADDING_RATIO)
+        padding = int(
+            min(padding_pixels, MAX_CONTEXT_PADDING) * self.SDXL_PADDING_MULTIPLIER
+        )
+
+        blur_radius = int(max(bbox_width, bbox_height) * BLUR_SCALE_FACTOR)
+        blur_radius = max(MIN_BLUR_RADIUS, min(blur_radius, MAX_BLUR_RADIUS))
+
+        img_h, img_w = mask_np.shape
+        x1 = max(0, x_min - padding)
+        y1 = max(0, y_min - padding)
+        x2 = min(img_w, x_max + 1 + padding)
+        y2 = min(img_h, y_max + 1 + padding)
+        x1, y1, x2, y2 = self._expand_bounds_to_min_size(x1, y1, x2, y2, img_w, img_h)
+
+        width = min(self._quantize_dimension(x2 - x1), img_w)
+        height = min(self._quantize_dimension(y2 - y1), img_h)
+        if x1 + width > img_w:
+            x1 = max(0, img_w - width)
+        if y1 + height > img_h:
+            y1 = max(0, img_h - height)
+        x2, y2 = x1 + width, y1 + height
+        width, height = x2 - x1, y2 - y1
+
+        if width <= 0 or height <= 0:
+            log_message(
+                f"  - Region has invalid size ({width}x{height}), skipping",
+                verbose=verbose,
+            )
+            return image_pil
+
+        log_message(
+            f"  - Processing region at ({x1}, {y1}) size {width}x{height}",
+            verbose=verbose,
+        )
+
+        image_cropped_pil = image_pil.crop((x1, y1, x2, y2))
+        if image_cropped_pil.mode != "RGB":
+            image_cropped_pil = image_cropped_pil.convert("RGB")
+        mask_crop_np = mask_np[y1:y2, x1:x2]
+
+        cache_params = {
+            "bbox": (x1, y1, width, height),
+            "padding": padding,
+            "blur": blur_radius,
+            "method": "sdxl",
+            "steps": self.num_inference_steps,
+            "guidance": self.guidance_scale,
+            "strength": self.strength,
+            "lum_corr": self.luminance_correction,
+            "upscale_small": self.upscale_small_crops,
+        }
+        if strict_mask_clipping:
+            cache_params["strict_clip"] = True
+        if composite_clip_bbox is not None:
+            cache_params["clip_bbox"] = tuple(composite_clip_bbox)
+        if ocr_params:
+            cache_params.update(ocr_params)
+
+        cache_key = None
+        cached_patch = None
+        if self.cache.should_use_inpaint_cache(seed):
+            cache_key = self.cache.get_inpaint_cache_key(
+                image_cropped_pil,
+                mask_crop_np.astype(np.uint8),
+                seed,
+                self.num_inference_steps,
+                self.guidance_scale,
+                self.SDXL_PROMPT,
+                cache_params,
+            )
+            cached_patch = self.cache.get_inpainted_image(cache_key)
+            if cached_patch is not None:
+                log_message("  - Using cached inpainting patch", verbose=verbose)
+
+        mask_float = mask_crop_np.astype(np.float32)
+        if blur_radius > 0:
+            d_out = distance_transform_edt(~mask_crop_np)
+            d_in = distance_transform_edt(mask_crop_np)
+            alpha = np.zeros_like(d_out, np.float32)
+            alpha[d_in > 0] = 1.0
+            ramp = np.clip(1.0 - (d_out / blur_radius), 0.0, 1.0)
+            alpha[d_out > 0] = ramp[d_out > 0]
+            mask_for_composite = torch.from_numpy(alpha)[None, ...]
+        else:
+            mask_for_composite = torch.from_numpy(mask_float)[None, ...]
+
+        if strict_mask_clipping:
+            original_mask_crop = torch.from_numpy(mask_crop_np.astype(np.float32))
+            mask_for_composite = mask_for_composite * original_mask_crop
+
+        if composite_clip_bbox is not None:
+            clip_x1, clip_y1, clip_x2, clip_y2 = composite_clip_bbox
+            clip_x1 = max(0, min(img_w, clip_x1))
+            clip_x2 = max(0, min(img_w, clip_x2))
+            clip_y1 = max(0, min(img_h, clip_y1))
+            clip_y2 = max(0, min(img_h, clip_y2))
+            start_x = max(0, clip_x1 - x1)
+            end_x = min(width, clip_x2 - x1)
+            start_y = max(0, clip_y1 - y1)
+            end_y = min(height, clip_y2 - y1)
+            if end_x <= start_x or end_y <= start_y:
+                mask_for_composite = torch.zeros_like(mask_for_composite)
+            else:
+                clipped_mask = torch.zeros_like(mask_for_composite)
+                clipped_mask[:, start_y:end_y, start_x:end_x] = mask_for_composite[
+                    :, start_y:end_y, start_x:end_x
+                ]
+                mask_for_composite = clipped_mask
+
+        patch_pil = cached_patch
+
+        if patch_pil is None:
+            inference_image, _, _ = self._prepare_image_for_inference(
+                image_cropped_pil, verbose=verbose
+            )
+            inference_w, inference_h = inference_image.size
+
+            # SDXL inpaint pipeline wants the mask at the same resolution as
+            # the image, white (255) = region to regenerate.
+            mask_img_pil = Image.fromarray(
+                (mask_crop_np.astype(np.uint8) * 255)
+            ).resize((inference_w, inference_h), Image.Resampling.NEAREST)
+
+            log_message("  - Running inference...", verbose=verbose)
+
+            with self.manager.flux_inference_lock:
+                self.load_models()
+
+                if self.pipeline is None:
+                    log_message(
+                        "Warning: SDXL Inpainting pipeline unavailable.",
+                        always_print=True,
+                    )
+                    return image_pil
+
+                gen = torch.Generator(device=self.DEVICE).manual_seed(seed)
+                with torch.inference_mode():
+                    out = self.pipeline(
+                        prompt=self.SDXL_PROMPT,
+                        negative_prompt=self.SDXL_NEGATIVE_PROMPT,
+                        image=inference_image,
+                        mask_image=mask_img_pil,
+                        width=inference_w,
+                        height=inference_h,
+                        num_inference_steps=self.num_inference_steps,
+                        guidance_scale=self.guidance_scale,
+                        strength=self.strength,
+                        generator=gen,
+                    )
+                    generated_patch_pil = out.images[0]
+
+            if (inference_w, inference_h) != (width, height):
+                patch_pil = generated_patch_pil.resize(
+                    (width, height), Image.Resampling.LANCZOS
+                )
+            else:
+                patch_pil = generated_patch_pil
+
+            if self.luminance_correction:
+                patch_pil = self._match_luminance(
+                    generated_pil=patch_pil,
+                    original_crop_pil=image_cropped_pil,
+                    mask_crop_np=mask_crop_np,
+                    verbose=verbose,
+                )
+
+        dest_tensor = torch.from_numpy(
+            np.asarray(image_pil, dtype=np.float32) / 255.0
+        ).unsqueeze(0)
+        src_tensor = torch.from_numpy(
+            np.asarray(patch_pil, dtype=np.float32) / 255.0
+        ).unsqueeze(0)
+
+        dest_channels = dest_tensor.shape[-1]
+        src_channels = src_tensor.shape[-1]
+        if dest_channels > src_channels:
+            pad = torch.ones(
+                (*src_tensor.shape[:-1], dest_channels - src_channels),
+                device=src_tensor.device,
+                dtype=src_tensor.dtype,
+            )
+            src_tensor = torch.cat([src_tensor, pad], dim=-1)
+        elif src_channels > dest_channels:
+            src_tensor = src_tensor[..., :dest_channels]
+
+        dest_tensor = dest_tensor.movedim(-1, 1)
+        src_tensor = src_tensor.movedim(-1, 1)
+
+        mask_interp = torch.nn.functional.interpolate(
+            mask_for_composite.reshape(
+                (-1, 1, mask_for_composite.shape[-2], mask_for_composite.shape[-1])
+            ),
+            size=(src_tensor.shape[2], src_tensor.shape[3]),
+            mode="bilinear",
+        )
+
+        composited = dest_tensor.clone()
+        visible_h = min(src_tensor.shape[2], dest_tensor.shape[2] - y1)
+        visible_w = min(src_tensor.shape[3], dest_tensor.shape[3] - x1)
+
+        if visible_h > 0 and visible_w > 0:
+            src_portion = src_tensor[:, :, :visible_h, :visible_w]
+            mask_portion = mask_interp[:, :, :visible_h, :visible_w]
+            dest_portion = composited[:, :, y1 : y1 + visible_h, x1 : x1 + visible_w]
+            blended = src_portion * mask_portion + dest_portion * (1 - mask_portion)
+            composited[:, :, y1 : y1 + visible_h, x1 : x1 + visible_w] = blended
+
+        composited = composited.movedim(1, -1)
+        composited_pil = Image.fromarray(
+            (composited[0].cpu().numpy() * 255).astype("uint8")
+        )
+
+        if (
+            self.cache.should_use_inpaint_cache(seed)
+            and cache_key is not None
+            and cached_patch is None
+        ):
+            self.cache.set_inpainted_image(cache_key, patch_pil)
+
+        return composited_pil
+
+
 class FluxKleinInpainter:
     """Inpainter using Flux.2 Klein models for text removal.
 

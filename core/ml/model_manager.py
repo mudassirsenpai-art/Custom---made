@@ -55,6 +55,7 @@ class ModelType(Enum):
     FLUX_KONTEXT_SDNQ_PIPELINE = "flux_kontext_sdnq_pipeline"
     FLUX_KLEIN_9B_PIPELINE = "flux_klein_9b_pipeline"
     FLUX_KLEIN_4B_PIPELINE = "flux_klein_4b_pipeline"
+    SDXL_INPAINT_PIPELINE = "sdxl_inpaint_pipeline"
     SDCPP_SERVER = "sdcpp_server"
     FLUX_KLEIN_SDCPP_VAE = "flux_klein_sdcpp_vae"
     FLUX_KONTEXT_SDCPP_CLIP_L = "flux_kontext_sdcpp_clip_l"
@@ -244,6 +245,10 @@ class ModelManager:
             },
             ModelType.FLUX_PIPELINE: {
                 "repo_id": "black-forest-labs/FLUX.1-Kontext-dev",
+                "filename": None,  # Pipeline loaded via from_pretrained
+            },
+            ModelType.SDXL_INPAINT_PIPELINE: {
+                "repo_id": "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
                 "filename": None,  # Pipeline loaded via from_pretrained
             },
         }
@@ -1650,6 +1655,110 @@ class ModelManager:
         return self._load_flux_klein(
             ModelType.FLUX_KLEIN_4B_PIPELINE, "4b", low_vram=low_vram, verbose=verbose
         )
+
+    def load_sdxl_inpaint(self, low_vram: bool = False, verbose: bool = False):
+        """Load the SDXL 1.0 Inpainting pipeline (diffusers/stable-diffusion-xl-1.0-inpainting-0.1).
+
+        Tuned for a fast-but-high-quality balance:
+          - half-precision weights on GPU (bf16 where the hardware accelerates
+            it, fp16 on pre-Ampere cards like the T4); fp32 on CPU
+          - the fp16 checkpoint is downloaded for either half-precision dtype,
+            since `variant` picks the files and `torch_dtype` does the casting
+          - DPMSolverMultistepScheduler w/ Karras sigmas (++), which reaches
+            Euler/DDIM-quality results in ~20-25 steps instead of 40-50+
+          - SDPA (PyTorch 2 native attention) is used automatically by diffusers;
+            xformers is enabled as an extra speed boost when available
+          - VAE slicing/tiling on to keep memory flat on large crops
+
+        Args:
+            low_vram: If True, use model CPU offload (slower, lower VRAM).
+            verbose: Whether to print verbose logging.
+
+        Returns:
+            The loaded StableDiffusionXLInpaintPipeline.
+        """
+        with self._lock:
+            if self.is_loaded(ModelType.SDXL_INPAINT_PIPELINE):
+                return self.models[ModelType.SDXL_INPAINT_PIPELINE]
+
+            log_message("Loading SDXL 1.0 Inpainting model...", verbose=verbose)
+
+            try:
+                from diffusers import (
+                    DPMSolverMultistepScheduler,
+                    StableDiffusionXLInpaintPipeline,
+                )
+
+                hf_info = self.model_hf_repos[ModelType.SDXL_INPAINT_PIPELINE]
+                repo_id = hf_info["repo_id"]
+
+                # fp16 on GPU for speed/VRAM; fp32 on CPU (fp16 kernels aren't
+                # accelerated there anyway, and fp32 avoids CPU fp16 slowdowns).
+                load_dtype = self.dtype if self.device.type != "cpu" else torch.float32
+
+                log_message(f"Loading SDXL inpaint pipeline from {repo_id}...", verbose=verbose)
+                pipeline = StableDiffusionXLInpaintPipeline.from_pretrained(
+                    repo_id,
+                    torch_dtype=load_dtype,
+                    # The fp16 files are the right download for any half-precision
+                    # run, bf16 included: `variant` only selects which checkpoint
+                    # to fetch, and `torch_dtype` casts it afterwards. Gating this
+                    # on float16 alone made every bf16 GPU pull the fp32 weights
+                    # (~13GB instead of ~7GB) for no benefit.
+                    variant="fp16" if load_dtype != torch.float32 else None,
+                    use_safetensors=True,
+                    cache_dir=str(self.flux_cache_dir.parent / "sdxl_inpaint"),
+                    add_watermarker=False,
+                )
+
+                # DPM++ 2M Karras: reaches high-quality convergence in far fewer
+                # steps than the pipeline's default scheduler, which is the main
+                # lever for keeping this "fast" without giving up quality.
+                pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
+                    pipeline.scheduler.config,
+                    algorithm_type="dpmsolver++",
+                    use_karras_sigmas=True,
+                )
+
+                if low_vram:
+                    log_message(
+                        "Using model CPU offload (low VRAM mode)...", verbose=verbose
+                    )
+                    pipeline.enable_model_cpu_offload()
+                else:
+                    pipeline = pipeline.to(self.device)
+
+                # Keep memory flat regardless of crop size; cheap when unneeded.
+                pipeline.vae.enable_slicing()
+                pipeline.vae.enable_tiling()
+
+                # Prefer xformers if present (extra speed on top of SDPA on some
+                # GPUs/driver combos); silently skip if unavailable, since
+                # diffusers already defaults to fast PyTorch2 SDPA attention.
+                try:
+                    pipeline.enable_xformers_memory_efficient_attention()
+                    log_message("xformers memory-efficient attention enabled.", verbose=verbose)
+                except Exception:
+                    pass
+
+                self.models[ModelType.SDXL_INPAINT_PIPELINE] = pipeline
+                log_message("SDXL 1.0 Inpainting model loaded successfully.", verbose=verbose)
+                return pipeline
+
+            except ImportError as e:
+                raise ModelError(
+                    "diffusers not installed or incompatible. SDXL inpainting requires diffusers."
+                ) from e
+            except Exception as e:
+                raise ModelError(f"Failed to load SDXL Inpainting model: {e}") from e
+
+    def unload_sdxl_inpaint(self, verbose: bool = False):
+        """Unload the SDXL Inpainting model."""
+        if self.is_loaded(ModelType.SDXL_INPAINT_PIPELINE):
+            self.unload_model(
+                ModelType.SDXL_INPAINT_PIPELINE, force_gc=True, verbose=verbose
+            )
+            log_message("SDXL Inpainting model unloaded.", verbose=verbose)
 
     def unload_model(
         self, model_type: ModelType, force_gc: bool = True, verbose: bool = False

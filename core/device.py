@@ -31,6 +31,30 @@ def get_best_device() -> torch.device:
     return torch.device("cpu")
 
 
+def _cuda_supports_bf16_natively(device: torch.device) -> bool:
+    """Whether a CUDA device has real bfloat16 hardware, not just the ability to
+    hold a bf16 tensor.
+
+    `torch.cuda.is_bf16_supported()` cannot be used here: it defaults to
+    `including_emulation=True` and falls back to simply allocating a bf16 tensor,
+    which succeeds on any CUDA device. On pre-Ampere cards (T4/Turing, sm_75) that
+    reports True while the hardware has no bf16 tensor cores at all, so picking
+    bf16 there silently drops off the tensor-core path and runs the model slower
+    than fp16 - which those cards *do* accelerate.
+
+    bf16 tensor cores arrive with compute capability 8.0 (Ampere). ROCm builds
+    support bf16 across the GPU archs this runs on, so they are taken as native.
+    """
+    if getattr(torch.version, "hip", None):
+        return True
+    try:
+        # Queried instead of torch.cuda.is_bf16_supported(including_emulation=False)
+        # because that keyword only exists on newer PyTorch releases.
+        return torch.cuda.get_device_capability(device)[0] >= 8
+    except Exception:
+        return False
+
+
 def get_best_dtype(device: Optional[torch.device] = None) -> torch.dtype:
     """Return the optimal dtype for the given device.
 
@@ -39,7 +63,8 @@ def get_best_dtype(device: Optional[torch.device] = None) -> torch.dtype:
 
     Returns:
         torch.dtype: The optimal dtype for the device.
-            - CUDA: bfloat16 if supported, else float16
+            - CUDA: bfloat16 when the hardware accelerates it (Ampere+), else
+              float16, which pre-Ampere cards do accelerate
             - XPU: bfloat16 if supported, else float16
             - MPS: float16
             - CPU: float32
@@ -55,7 +80,7 @@ def get_best_dtype(device: Optional[torch.device] = None) -> torch.dtype:
     device_type = device.type
 
     if device_type == "cuda":
-        if torch.cuda.is_bf16_supported():
+        if _cuda_supports_bf16_natively(device):
             return torch.bfloat16
         return torch.float16
 

@@ -728,6 +728,36 @@ def main():
             "when it improves the layout."
         ),
     )
+    parser.add_argument(
+        "--match-original-style",
+        action="store_true",
+        help=(
+            "Copy the original lettering style onto the translation: fill colour, "
+            "outline colour and width, glow colour and radius, and font size, "
+            "measured from the source text before it is cleaned. Applies to both "
+            "speech bubbles and outside-bubble text. Anything that cannot be "
+            "measured confidently falls back to the normal settings."
+        ),
+    )
+    parser.add_argument(
+        "--match-original-style-tolerance",
+        type=float,
+        default=0.25,
+        help=(
+            "How much larger than the measured original the copied text may be set, "
+            "as a fraction (0.0-1.0). The measured size is a ceiling, so longer "
+            "translations still shrink to fit. Only used with --match-original-style."
+        ),
+    )
+    parser.add_argument(
+        "--match-original-style-min-confidence",
+        type=float,
+        default=0.35,
+        help=(
+            "Discard style measurements scoring below this confidence (0.0-1.0) and "
+            "render those regions normally. Only used with --match-original-style."
+        ),
+    )
     # Output args
     parser.add_argument(
         "--jpeg-quality",
@@ -887,7 +917,7 @@ def main():
     parser.add_argument(
         "--osb-inpainting-method",
         type=str,
-        choices=["flux_klein_9b", "flux_klein_4b", "flux_kontext", "lama", "lama_large", "opencv", "none"],
+        choices=["flux_klein_9b", "flux_klein_4b", "flux_kontext", "sdxl", "lama", "lama_large", "opencv", "none"],
         default="flux_klein_4b",
         help="Inpainting method for outside text removal.",
     )
@@ -984,6 +1014,18 @@ def main():
         type=float,
         default=0.15,
         help="Residual diff threshold for Flux.1 Kontext via Nunchaku (0.0-1.0)",
+    )
+    parser.add_argument(
+        "--osb-sdxl-guidance-scale",
+        type=float,
+        default=6.5,
+        help="CFG guidance scale for SDXL Inpainting (lower = cleaner results at low step counts, higher = more prompt-faithful)",
+    )
+    parser.add_argument(
+        "--osb-sdxl-strength",
+        type=float,
+        default=0.99,
+        help="Denoise strength within the OSB mask for SDXL Inpainting (0.0-1.0, 0.99 = near-full art regeneration)",
     )
     parser.add_argument(
         "--osb-seed",
@@ -1510,6 +1552,11 @@ def main():
             supersampling_factor=args.supersampling_factor,
             detach_trailing_punctuation=args.detach_trailing_punctuation,
             auto_vertical_text=args.auto_vertical_text,
+            match_original_style=args.match_original_style,
+            match_original_style_tolerance=args.match_original_style_tolerance,
+            match_original_style_min_confidence=(
+                args.match_original_style_min_confidence
+            ),
         ),
         output=OutputConfig(
             output_format=args.output_format,
@@ -1537,6 +1584,8 @@ def main():
             flux_group_regions=args.osb_flux_group_regions,
             sfx_skip_inpaint=args.osb_sfx_skip_inpaint,
             flux_residual_diff_threshold=args.osb_flux_residual_threshold,
+            sdxl_guidance_scale=args.osb_sdxl_guidance_scale,
+            sdxl_strength=args.osb_sdxl_strength,
             osb_confidence=args.osb_confidence,
             osb_model_variant=args.osb_model_variant,
             seed=args.osb_seed,

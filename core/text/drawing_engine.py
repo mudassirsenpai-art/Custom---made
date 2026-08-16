@@ -137,6 +137,9 @@ def draw_layout(
     pre_translate_y: float = 0.0,
     pre_rotate_deg: float = 0.0,
     text_background_color: Optional[int] = None,
+    outline_color: Optional[int] = None,
+    glow_color: Optional[int] = None,
+    glow_radius: float = 0.0,
 ) -> bool:
     """
     Draws the text layout onto a Skia surface.
@@ -159,6 +162,11 @@ def draw_layout(
         font_hinting: Font hinting level ("none", "slight", "normal", "full")
         outline_width: Width of text outline (0 = no outline)
         verbose: Whether to print detailed logs
+        outline_color: Skia color for the outline; None picks black or white
+            automatically from the text color's luminance
+        glow_color: Skia color for a soft halo drawn behind the text
+            (None = no halo)
+        glow_radius: Blur radius of that halo in pixels
 
     Returns:
         True if successful, False otherwise
@@ -187,11 +195,12 @@ def draw_layout(
 
         outline_paint = None
         if outline_width > 0:
-            r = skia.ColorGetR(text_color)
-            g = skia.ColorGetG(text_color)
-            b = skia.ColorGetB(text_color)
-            lum = 0.299 * r + 0.587 * g + 0.114 * b
-            outline_color = skia.ColorBLACK if lum >= 80 else skia.ColorWHITE
+            if outline_color is None:
+                r = skia.ColorGetR(text_color)
+                g = skia.ColorGetG(text_color)
+                b = skia.ColorGetB(text_color)
+                lum = 0.299 * r + 0.587 * g + 0.114 * b
+                outline_color = skia.ColorBLACK if lum >= 80 else skia.ColorWHITE
 
             outline_paint = skia.Paint(
                 AntiAlias=True,
@@ -199,6 +208,24 @@ def draw_layout(
                 Style=skia.Paint.kStroke_Style,
                 StrokeWidth=outline_width,
                 StrokeJoin=skia.Paint.kRound_Join,
+            )
+
+        # The halo is a blurred, widened copy of the glyphs drawn underneath
+        # everything else, so the keyline and fill land on top of it.
+        glow_paint = None
+        if glow_color is not None and glow_radius > 0:
+            # Skia's blur takes a sigma; a Gaussian's visible reach is roughly
+            # three sigma, which is what the extractor measured as the radius.
+            glow_sigma = max(0.1, float(glow_radius) / 3.0)
+            glow_paint = skia.Paint(
+                AntiAlias=True,
+                Color=glow_color,
+                Style=skia.Paint.kStrokeAndFill_Style,
+                StrokeWidth=max(float(glow_radius), outline_width),
+                StrokeJoin=skia.Paint.kRound_Join,
+                MaskFilter=skia.MaskFilter.MakeBlur(
+                    skia.kNormal_BlurStyle, glow_sigma
+                ),
             )
 
         block_start_x = target_center_x - final_max_line_width / 2.0
@@ -339,6 +366,8 @@ def draw_layout(
                         )
                         text_blob = builder.make()
                         if text_blob:
+                            if glow_paint:
+                                canvas.drawTextBlob(text_blob, 0, 0, glow_paint)
                             if outline_paint:
                                 canvas.drawTextBlob(text_blob, 0, 0, outline_paint)
                             canvas.drawTextBlob(text_blob, 0, 0, paint)
@@ -452,6 +481,8 @@ def draw_layout(
                             )
                             text_blob = builder.make()
                             if text_blob:
+                                if glow_paint:
+                                    canvas.drawTextBlob(text_blob, 0, 0, glow_paint)
                                 if outline_paint:
                                     canvas.drawTextBlob(text_blob, 0, 0, outline_paint)
                                 canvas.drawTextBlob(text_blob, 0, 0, paint)

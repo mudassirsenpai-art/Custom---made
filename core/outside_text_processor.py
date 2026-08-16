@@ -23,6 +23,7 @@ from core.image.image_utils import cv2_to_pil, pil_to_cv2, process_bubble_image_
 from core.image.inpainting import (
     FluxKleinInpainter,
     FluxKontextInpainter,
+    SDXLInpainter,
     lama_or_opencv_inpaint,
     opencv_texture_inpaint,
 )
@@ -858,6 +859,36 @@ def finish_outside_text_work(
             except Exception as e:
                 log_message(
                     f"Flux Kontext unavailable ({e}), falling back to OpenCV",
+                    verbose=verbose,
+                )
+
+        if inpainting_method == "sdxl":
+            try:
+                inpainter = SDXLInpainter(
+                    device=config.device,
+                    # SDXL isn't distilled like Flux Klein, so it doesn't
+                    # share Klein's ultra-low 1-4 step range - but it can
+                    # still run fast at 8-10 steps with DPM++2M Karras.
+                    # Reuses the same "OSB Flux Steps" bot setting; clamped
+                    # to a sane 8-10 floor/ceiling since values outside that
+                    # (tuned for Klein) would hurt SDXL's quality either way.
+                    num_inference_steps=max(
+                        8, min(10, config.outside_text.flux_num_inference_steps or 9)
+                    ),
+                    guidance_scale=config.outside_text.sdxl_guidance_scale,
+                    strength=config.outside_text.sdxl_strength,
+                    low_vram=config.outside_text.flux_low_vram,
+                    luminance_correction=config.outside_text.flux_luminance_correction,
+                    upscale_small_crops=config.outside_text.flux_upscale_small_crops,
+                    verbose=verbose,
+                )
+                log_message(
+                    "Using SDXL 1.0 Inpainting for OSB art regeneration",
+                    verbose=verbose,
+                )
+            except Exception as e:
+                log_message(
+                    f"SDXL Inpainting unavailable ({e}), falling back to OpenCV",
                     verbose=verbose,
                 )
 

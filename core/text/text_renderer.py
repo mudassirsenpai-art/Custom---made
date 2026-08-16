@@ -363,6 +363,19 @@ def render_text_skia(
             text_background_color[2],
         )
 
+    # Styles copied off the original lettering. Left as None when nothing was
+    # measured, which lets the drawing engine keep its own automatic choices.
+    outline_color = None
+    if getattr(config, "outline_color_rgb", None) is not None:
+        outline_color = skia.Color(*config.outline_color_rgb[:3])
+
+    glow_color = None
+    glow_radius = float(getattr(config, "glow_radius", 0.0) or 0.0)
+    if getattr(config, "glow_color_rgb", None) is not None and glow_radius > 0:
+        glow_color = skia.Color(*config.glow_color_rgb[:3])
+    else:
+        glow_radius = 0.0
+
     # Apply supersampling if enabled
     if config.supersampling_factor > 1:
         log_message(
@@ -488,7 +501,11 @@ def render_text_skia(
                 else 0.0
             ),
             text_background_color=skia_bg_color,
+            outline_color=outline_color,
+            glow_color=glow_color,
+            glow_radius=glow_radius * factor,  # Scale the halo with the canvas
         )
+
 
         if not success:
             log_message("Drawing failed", always_print=True)
@@ -554,6 +571,9 @@ def render_text_skia(
                 else 0.0
             ),
             text_background_color=skia_bg_color,
+            outline_color=outline_color,
+            glow_color=glow_color,
+            glow_radius=glow_radius,
         )
 
         if not success:

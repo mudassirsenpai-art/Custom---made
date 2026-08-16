@@ -22,6 +22,12 @@ from .font_manager import (
     load_font_data,
 )
 from .layout_engine import find_optimal_layout, shape_line
+from .style_extraction import (
+    StyleOverrides,
+    describe_style,
+    extract_text_style,
+    resolve_style_overrides,
+)
 from .text_processing import (
     find_optimal_breaks_dp,
     is_cjk_character,
@@ -50,4 +56,8 @@ __all__ = [
     "tokenize_styled_text",
     "try_hyphenate_word",
     "render_text_skia",
+    "extract_text_style",
+    "resolve_style_overrides",
+    "describe_style",
+    "StyleOverrides",
 ]
