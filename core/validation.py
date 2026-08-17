@@ -29,12 +29,14 @@ SETTING_CONSTRAINTS: Dict[str, Tuple[float, float]] = {
     "badness_exponent": (2.0, 4.0),
     "padding_pixels": (2, 12),
     "supersampling_factor": (1, 16),
+    "match_original_style_tolerance": (0.0, 1.0),
     "outside_text_osb_confidence": (0.0, 1.0),
     "outside_text_bbox_expansion_percent": (0.0, 1.0),
     "outside_text_osb_render_expansion_narrow_multiplier": (1.0, 3.0),
     "outside_text_osb_render_expansion_tiny_multiplier": (1.0, 3.0),
     "outside_text_osb_render_expansion_aspect_ratio_threshold": (0.05, 1.0),
     "outside_text_osb_render_expansion_area_ratio_threshold": (0.0, 0.05),
+    "outside_text_osb_render_expansion_wide_banner_ratio_threshold": (1.0, 10.0),
     "outside_text_text_box_proximity_ratio": (0.01, 0.1),
     "outside_text_page_filter_margin_threshold": (0.0, 0.3),
     "outside_text_page_filter_min_area_ratio": (0.0, 0.2),
@@ -77,6 +79,9 @@ _CONFIG_ATTR_PATHS: Dict[str, Tuple[Tuple[str, ...], ...]] = {
     "badness_exponent": (("rendering", "badness_exponent"),),
     "padding_pixels": (("rendering", "padding_pixels"),),
     "supersampling_factor": (("rendering", "supersampling_factor"),),
+    "match_original_style_tolerance": (
+        ("rendering", "match_original_style_tolerance"),
+    ),
     "outside_text_osb_confidence": (("outside_text", "osb_confidence"),),
     "outside_text_bbox_expansion_percent": (
         ("outside_text", "bbox_expansion_percent"),
@@ -92,6 +97,9 @@ _CONFIG_ATTR_PATHS: Dict[str, Tuple[Tuple[str, ...], ...]] = {
     ),
     "outside_text_osb_render_expansion_area_ratio_threshold": (
         ("outside_text", "osb_render_expansion_area_ratio_threshold"),
+    ),
+    "outside_text_osb_render_expansion_wide_banner_ratio_threshold": (
+        ("outside_text", "osb_render_expansion_wide_banner_ratio_threshold"),
     ),
     "outside_text_text_box_proximity_ratio": (
         ("outside_text", "text_box_proximity_ratio"),

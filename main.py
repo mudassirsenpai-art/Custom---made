@@ -732,11 +732,12 @@ def main():
         "--match-original-style",
         action="store_true",
         help=(
-            "Copy the original lettering style onto the translation: fill colour, "
-            "outline colour and width, glow colour and radius, and font size, "
-            "measured from the source text before it is cleaned. Applies to both "
-            "speech bubbles and outside-bubble text. Anything that cannot be "
-            "measured confidently falls back to the normal settings."
+            "Copy original text style: measure the original text's ink "
+            "height per speech bubble and try to render translated text at "
+            "that size instead of always maximizing to --max-font-size. "
+            "Falls back to normal max-fit sizing if the translated text "
+            "doesn't fit even at the tolerated minimum (see "
+            "--match-original-style-tolerance)."
         ),
     )
     parser.add_argument(
@@ -744,18 +745,22 @@ def main():
         type=float,
         default=0.25,
         help=(
-            "How much larger than the measured original the copied text may be set, "
-            "as a fraction (0.0-1.0). The measured size is a ceiling, so longer "
-            "translations still shrink to fit. Only used with --match-original-style."
+            "How far below the measured original size rendering may shrink "
+            "before giving up and falling back to normal max-fit sizing "
+            "(0.0-1.0, e.g. 0.25 = down to 75%% of the original size). "
+            "Only used when --match-original-style is set."
         ),
     )
     parser.add_argument(
-        "--match-original-style-min-confidence",
-        type=float,
-        default=0.35,
+        "--detect-glow",
+        action="store_true",
         help=(
-            "Discard style measurements scoring below this confidence (0.0-1.0) and "
-            "render those regions normally. Only used with --match-original-style."
+            "Reproduce a soft glow/halo detected around the original text "
+            "(e.g. title cards with a colored blur behind the letters). "
+            "Independent of --outline-width, which draws a fixed hard "
+            "stroke regardless of the source image; this instead measures "
+            "each bubble/OSB region and only draws a halo where one was "
+            "actually detected, using its measured color and radius."
         ),
     )
     # Output args
@@ -1110,6 +1115,16 @@ def main():
         type=float,
         default=0.005,
         help="Classify OSB boxes as tiny below this image area ratio",
+    )
+    parser.add_argument(
+        "--osb-render-expansion-wide-banner-threshold",
+        type=float,
+        default=2.5,
+        help=(
+            "Classify OSB boxes as wide banners (title cards) at or above "
+            "this width/height ratio, so they get the same 'narrow' "
+            "expansion treatment as tall boxes (1.0-10.0)"
+        ),
     )
     parser.add_argument(
         "--osb-text-box-proximity-ratio",
@@ -1554,9 +1569,7 @@ def main():
             auto_vertical_text=args.auto_vertical_text,
             match_original_style=args.match_original_style,
             match_original_style_tolerance=args.match_original_style_tolerance,
-            match_original_style_min_confidence=(
-                args.match_original_style_min_confidence
-            ),
+            detect_glow=args.detect_glow,
         ),
         output=OutputConfig(
             output_format=args.output_format,
@@ -1605,6 +1618,9 @@ def main():
             ),
             osb_render_expansion_area_ratio_threshold=(
                 args.osb_render_expansion_area_threshold
+            ),
+            osb_render_expansion_wide_banner_ratio_threshold=(
+                args.osb_render_expansion_wide_banner_threshold
             ),
             text_box_proximity_ratio=args.osb_text_box_proximity_ratio,
         ),

@@ -56,7 +56,6 @@ from .services.translation import (
     prepare_bubble_images_for_translation,
 )
 from .text.placeholders import generate_test_placeholders
-from .text.style_extraction import extract_text_style, resolve_style_overrides
 from .text.text_processing import supports_long_word_breaking
 from .text.text_renderer import render_text_skia
 
@@ -67,6 +66,41 @@ if TYPE_CHECKING:
 ENABLE_COMPONENT_ORDER_DEBUG = False
 PREVIOUS_CONTEXT_CACHE_MAX_SIZE = 32
 NATURAL_SORT_TOKEN_RE = re.compile(r"(\d+)")
+
+# "Copy Original Text Style" support. Typical fonts have a cap-height
+# (uppercase letter height, roughly what a detected text-ink bbox measures)
+# that's about 70% of the nominal font size (em height). Dividing measured
+# ink height by this ratio gives an approximate font size that will visually
+# match the original text's height when rendered in the (different) target
+# font. This is a rough, font-independent heuristic, not an exact match -
+# real fonts vary, and translated text length differs from source text
+# length, which is why target_font_size_tolerance exists as a safety net.
+CAP_HEIGHT_TO_FONT_SIZE_RATIO = 0.7
+MIN_ORIGINAL_TEXT_PX_HEIGHT_FOR_MATCHING = 6  # ignore noise-sized detections
+
+
+def estimate_target_font_size_from_line_height(
+    median_line_height: Optional[float],
+) -> Optional[float]:
+    """Estimate a target font size (px) from a measured original-text
+    single-line ink height, for use with RenderingConfig.target_font_size.
+
+    Args:
+        median_line_height: Median height (px) of individual text-line ink
+            contours, as computed by cleaning.py's process_single_bubble
+            (stored as bubble["text_median_line_height"]) or the equivalent
+            OSB glyph-mask measurement. None if unavailable.
+
+    Returns:
+        Estimated font size in px, or None if unavailable/too small to
+        trust (very small measurements are more likely noise/punctuation
+        than a reliable line-height sample).
+    """
+    if median_line_height is None or median_line_height <= 0:
+        return None
+    if median_line_height < MIN_ORIGINAL_TEXT_PX_HEIGHT_FOR_MATCHING:
+        return None
+    return float(median_line_height) / CAP_HEIGHT_TO_FONT_SIZE_RATIO
 
 
 def _should_overlap_llm_with_inpaint(
@@ -143,126 +177,7 @@ def _clean_speech_bubbles_for_page(
         return fallback_cv_image.copy(), []
 
 
-def _attach_original_text_styles(
-    text_elements: List[Dict[str, Any]],
-    original_cv_image: np.ndarray,
-    *,
-    verbose: bool = False,
-) -> int:
-    """
-    Measure each text element's original lettering style and store it on the element.
-
-    This has to run before cleaning and inpainting, which are what destroy the
-    pixels being measured. Outside-bubble elements carry their own pre-inpaint
-    crop; speech bubbles are cropped straight out of the page, which is in the
-    same coordinate space as their bboxes.
-
-    The measurement is stored under `original_style` as a dict of plain scalars so
-    it survives the pickle round-trip that manual mode's checkpoint does - in Pass
-    2 the original pixels are long gone, and the stored read is the only copy.
-
-    Returns the number of elements a style could be measured for.
-    """
-    measured = 0
-    for element in text_elements or []:
-        element["original_style"] = None
-        try:
-            crop_pil = element.get("original_crop_pil")
-            if crop_pil is not None:
-                region = pil_to_cv2(crop_pil)
-            else:
-                bbox = element.get("bbox")
-                if not bbox or len(bbox) != 4:
-                    continue
-                x1, y1, x2, y2 = (int(round(float(v))) for v in bbox)
-                height, width = original_cv_image.shape[:2]
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(width, x2), min(height, y2)
-                if x2 - x1 < 2 or y2 - y1 < 2:
-                    continue
-                region = original_cv_image[y1:y2, x1:x2]
-
-            style = extract_text_style(
-                region,
-                verbose=verbose,
-                label=str(element.get("bbox")),
-            )
-            element["original_style"] = style
-            if style:
-                measured += 1
-        except Exception as e:
-            log_message(
-                f"Original-style probe failed for {element.get('bbox')}: {e}",
-                verbose=verbose,
-            )
-            element["original_style"] = None
-
-    return measured
-
-
-def _apply_original_style(
-    render_config: RenderingConfig,
-    style: Optional[Dict[str, Any]],
-    text_color_rgb: Optional[Tuple[int, int, int]],
-    *,
-    enabled: bool,
-    tolerance: float,
-    min_confidence: float,
-    label: str = "",
-    verbose: bool = False,
-) -> Tuple[RenderingConfig, Optional[Tuple[int, int, int]]]:
-    """
-    Fold a measured original style into the settings a region is about to render with.
-
-    Each attribute is independent: whatever was not measured confidently keeps the
-    value the caller configured, so a partial or failed read degrades to ordinary
-    rendering rather than to a half-copied look. The measured font size arrives as
-    a ceiling, so the layout engine can still shrink a longer translation to fit.
-
-    Returns the (mutated) config and the text colour to render with.
-    """
-    if not enabled or not style:
-        return render_config, text_color_rgb
-
-    overrides = resolve_style_overrides(
-        style,
-        base_min_font=render_config.min_font_size,
-        base_max_font=render_config.max_font_size,
-        tolerance=tolerance,
-        min_confidence=min_confidence,
-    )
-    if not overrides:
-        log_message(
-            f"Original style {label}: read too weak to copy, using defaults",
-            verbose=verbose,
-        )
-        return render_config, text_color_rgb
-
-    if overrides.max_font_size is not None:
-        render_config.max_font_size = overrides.max_font_size
-        # The binary search needs room below the ceiling it was just handed.
-        render_config.min_font_size = min(
-            render_config.min_font_size, overrides.max_font_size
-        )
-    if overrides.outline_width is not None:
-        render_config.outline_width = overrides.outline_width
-    if overrides.outline_color_rgb is not None:
-        render_config.outline_color_rgb = overrides.outline_color_rgb
-    if overrides.glow_color_rgb is not None and overrides.glow_radius:
-        render_config.glow_color_rgb = overrides.glow_color_rgb
-        render_config.glow_radius = overrides.glow_radius
-    if overrides.text_color_rgb is not None:
-        text_color_rgb = overrides.text_color_rgb
-
-    log_message(
-        f"Original style {label}: copied {overrides.summary()}",
-        verbose=verbose,
-    )
-    return render_config, text_color_rgb
-
-
 def compute_bubble_id(bbox, is_outside_text: bool = False, salt: str = "") -> str:
-
     """
     Build a stable identifier for a bubble/OSB text-element from its bbox.
 
@@ -416,6 +331,7 @@ def _render_from_manual_checkpoint(
             "is_colored": info.get("is_colored", False),
             "text_bbox": info.get("text_bbox"),
             "text_color_bgr": info.get("text_color_bgr"),
+            "text_median_line_height": info.get("text_median_line_height"),
         }
         for info in processed_bubbles_info
         if "bbox" in info and "color" in info and "mask" in info
@@ -463,6 +379,9 @@ def _render_from_manual_checkpoint(
         base_mask = None
         is_sam_mask = False
         text_bg_rgb = None
+        target_font_size = None
+        glow_color = None
+        glow_radius = 0.0
 
         if is_outside_text:
             if is_sfx and "original_crop_pil" in bubble:
@@ -497,6 +416,20 @@ def _render_from_manual_checkpoint(
             bubble_color_bgr = (50, 50, 50) if is_dark_text else (255, 255, 255)
             rotation_deg = 0.0
             vertical_stack = False
+            if config.rendering.match_original_style:
+                target_font_size = estimate_target_font_size_from_line_height(
+                    bubble.get("text_median_line_height")
+                )
+                if target_font_size is not None:
+                    target_font_size = scale_font_size(
+                        target_font_size,
+                        processing_scale,
+                        minimum=osb_min_font,
+                        maximum=osb_max_font,
+                    )
+            if config.rendering.detect_glow:
+                glow_color = bubble.get("glow_color_rgb")
+                glow_radius = bubble.get("glow_radius") or 0.0
             # Solid text-background boxes are reserved for genuinely
             # un-inpainted OSB regions (inpainting_method == "none", where the
             # original pixels are still underneath). When real inpainting ran
@@ -538,6 +471,20 @@ def _render_from_manual_checkpoint(
                         text_color_bgr_val[1],
                         text_color_bgr_val[0],
                     )
+                if config.rendering.match_original_style:
+                    target_font_size = estimate_target_font_size_from_line_height(
+                        render_info.get("text_median_line_height")
+                    )
+                    if target_font_size is not None:
+                        target_font_size = scale_font_size(
+                            target_font_size,
+                            processing_scale,
+                            minimum=main_min_font,
+                            maximum=main_max_font,
+                        )
+                if config.rendering.detect_glow:
+                    glow_color = render_info.get("glow_color_rgb")
+                    glow_radius = render_info.get("glow_radius") or 0.0
             vertical_stack = False
             rotation_deg = 0.0
 
@@ -571,20 +518,10 @@ def _render_from_manual_checkpoint(
             auto_vertical_text=(
                 False if is_outside_text else config.rendering.auto_vertical_text
             ),
-        )
-
-        # Style measured back in Pass 1, when the original text still existed.
-        # Checkpoints written before this feature simply have no entry, which
-        # lands on the defaults above.
-        render_config, text_color_rgb = _apply_original_style(
-            render_config,
-            bubble.get("original_style"),
-            text_color_rgb,
-            enabled=config.rendering.match_original_style,
-            tolerance=config.rendering.match_original_style_tolerance,
-            min_confidence=config.rendering.match_original_style_min_confidence,
-            label=str(bbox),
-            verbose=verbose,
+            target_font_size=target_font_size,
+            target_font_size_tolerance=config.rendering.match_original_style_tolerance,
+            glow_color=glow_color,
+            glow_radius=glow_radius,
         )
 
         success = False
@@ -1913,20 +1850,6 @@ def translate_and_render(
                 sorted_bubble_data = sort_bubbles_by_reading_order(
                     all_text_data, reading_direction, panels=panels
                 )
-
-                # Read the original lettering style off the untouched page, for
-                # both bubbles and outside text. This is the last point where
-                # those pixels still exist, and it is upstream of the manual
-                # checkpoint, so Pass 2 gets the measurement for free.
-                if config.rendering.match_original_style:
-                    measured = _attach_original_text_styles(
-                        sorted_bubble_data, original_cv_image, verbose=verbose
-                    )
-                    log_message(
-                        f"Original style: measured {measured}/{len(sorted_bubble_data)} "
-                        "text regions",
-                        verbose=verbose,
-                    )
                 if ENABLE_COMPONENT_ORDER_DEBUG:
                     bubble_debug_masks = {}
                     for bubble in sorted_bubble_data:
@@ -2385,6 +2308,9 @@ def translate_and_render(
                         "is_colored": info.get("is_colored", False),
                         "text_bbox": info.get("text_bbox"),
                         "text_color_bgr": info.get("text_color_bgr"),
+                        "text_median_line_height": info.get(
+                            "text_median_line_height"
+                        ),
                     }
                     for info in processed_bubbles_info
                     if "bbox" in info and "color" in info and "mask" in info
@@ -2462,6 +2388,9 @@ def translate_and_render(
                             bubble["translation"] = text
 
                         # Use OSB-specific settings for outside text, regular settings for speech bubbles
+                        target_font_size = None
+                        glow_color = None
+                        glow_radius = 0.0
                         if is_outside_text:
                             log_message(
                                 f"Rendering outside text {bbox}: '{text[:30]}...'",
@@ -2486,6 +2415,22 @@ def translate_and_render(
                             # OSB renders default to horizontal; vertical stacking is fallback-only
                             rotation_deg = 0.0
                             vertical_stack = False
+                            if config.rendering.match_original_style:
+                                target_font_size = (
+                                    estimate_target_font_size_from_line_height(
+                                        bubble.get("text_median_line_height")
+                                    )
+                                )
+                                if target_font_size is not None:
+                                    target_font_size = scale_font_size(
+                                        target_font_size,
+                                        processing_scale,
+                                        minimum=osb_min_font,
+                                        maximum=osb_max_font,
+                                    )
+                            if config.rendering.detect_glow:
+                                glow_color = bubble.get("glow_color_rgb")
+                                glow_radius = bubble.get("glow_radius") or 0.0
 
                             text_bg_rgb = None
                             # Same rule as the first render pass above: only
@@ -2535,6 +2480,26 @@ def translate_and_render(
                                         text_color_bgr_val[1],
                                         text_color_bgr_val[0],
                                     )
+                                if config.rendering.match_original_style:
+                                    target_font_size = (
+                                        estimate_target_font_size_from_line_height(
+                                            render_info.get(
+                                                "text_median_line_height"
+                                            )
+                                        )
+                                    )
+                                    if target_font_size is not None:
+                                        target_font_size = scale_font_size(
+                                            target_font_size,
+                                            processing_scale,
+                                            minimum=main_min_font,
+                                            maximum=main_max_font,
+                                        )
+                                if config.rendering.detect_glow:
+                                    glow_color = render_info.get("glow_color_rgb")
+                                    glow_radius = (
+                                        render_info.get("glow_radius") or 0.0
+                                    )
                             # No rotation/stacking for regular bubbles
                             vertical_stack = False
                             rotation_deg = 0.0
@@ -2579,22 +2544,13 @@ def translate_and_render(
                                 if is_outside_text
                                 else config.rendering.auto_vertical_text
                             ),
-                        )
-
-                        # Copy the original lettering, measured before cleaning.
-                        render_config, text_color_rgb = _apply_original_style(
-                            render_config,
-                            bubble.get("original_style"),
-                            text_color_rgb,
-                            enabled=config.rendering.match_original_style,
-                            tolerance=config.rendering.match_original_style_tolerance,
-                            min_confidence=(
-                                config.rendering.match_original_style_min_confidence
+                            target_font_size=target_font_size,
+                            target_font_size_tolerance=(
+                                config.rendering.match_original_style_tolerance
                             ),
-                            label=str(bbox),
-                            verbose=verbose,
+                            glow_color=glow_color,
+                            glow_radius=glow_radius,
                         )
-
                         success = False
                         if is_outside_text:
                             try:

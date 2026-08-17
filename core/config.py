@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 
@@ -114,26 +114,37 @@ class RenderingConfig:
     supersampling_factor: int = 4
     detach_trailing_punctuation: bool = True
     auto_vertical_text: bool = False
-
-    # --- Copy the original lettering style ---
-    # When enabled, the fill colour, keyline colour and width, glow colour and
-    # radius, and font size of the *source* text are measured off the untouched
-    # page and reused for the translation. Anything that cannot be measured
-    # confidently keeps the value configured above, so a failed read degrades to
-    # ordinary rendering instead of to a wrong-looking page.
+    # "Copy Original Text Style" support: when target_font_size is set (a
+    # font size in px derived from measuring the original source text's ink
+    # height), the layout engine tries to render at that size instead of
+    # always maxing out to max_font_size. target_font_size_tolerance allows
+    # shrinking below the target (as a fraction, e.g. 0.25 = down to 75% of
+    # target) to accommodate translated text that's longer than the source.
+    # If the text still doesn't fit at the lowest tolerated size, rendering
+    # falls back to the normal max-fit behavior so text never overflows.
+    target_font_size: Optional[float] = None
+    target_font_size_tolerance: float = 0.25
+    # User-facing toggle (bot.py "Copy Original Text Style" / --match-original-style).
+    # When True, pipeline.py measures the original text's ink height per
+    # bubble and sets target_font_size/target_font_size_tolerance above
+    # before calling render_text_skia. When False, rendering is 100%
+    # unchanged from the original max-fit-to-bbox behavior.
     match_original_style: bool = False
-    # How much larger than the measured original the text may be set, as a
-    # fraction. The measured size becomes a ceiling, not a fixed size: the layout
-    # engine still shrinks text that no longer fits once translated.
     match_original_style_tolerance: float = 0.25
-    # Measurements scoring below this confidence are discarded.
-    match_original_style_min_confidence: float = 0.35
-
-    # Per-region style values, normally filled in from the measurement above
-    # rather than configured by hand. None means "decide as usual".
-    outline_color_rgb: Optional[Tuple[int, int, int]] = None
-    glow_color_rgb: Optional[Tuple[int, int, int]] = None
+    # Per-instance target values for a soft blurred glow/halo painted behind
+    # the text, detected from the source image (see
+    # core.image.glow_detection.detect_glow_halo). None/0.0 = no glow drawn.
+    # Distinct from outline_width above: outline_width is a fixed hard
+    # stroke the user configures manually; glow_color/glow_radius are set
+    # per-bubble by pipeline.py only when detect_glow is enabled below.
+    glow_color: Optional[tuple[int, int, int]] = None
     glow_radius: float = 0.0
+    # User-facing toggle: when True, pipeline.py measures whether the
+    # original text had a soft glow/halo around it (as opposed to no
+    # decoration, or the fixed hard-stroke outline above) and, if so,
+    # reproduces it using glow_color/glow_radius. When False, rendering is
+    # unchanged - no glow detection runs, no halo is drawn.
+    detect_glow: bool = False
 
 
 @dataclass
@@ -179,6 +190,12 @@ class OutsideTextConfig:
     osb_render_expansion_tiny_multiplier: float = 1.0
     osb_render_expansion_aspect_ratio_threshold: float = 0.4
     osb_render_expansion_area_ratio_threshold: float = 0.005
+    # Wide, short "banner" title boxes (width >> height, e.g. stylized title
+    # cards) also get clipped by the detector and need the same expansion
+    # treatment as narrow/tall boxes. Default mirrors the narrow threshold
+    # (1/0.4 = 2.5): a box this much wider than it is tall is treated the
+    # same as one this much taller than it is wide.
+    osb_render_expansion_wide_banner_ratio_threshold: float = 2.5
     text_box_proximity_ratio: float = 0.02  # 2% of image dimension
     flux_guidance_scale: float = 2.5
     flux_prompt: str = "Remove all text."

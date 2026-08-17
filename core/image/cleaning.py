@@ -15,6 +15,7 @@ from core.batch_coordinator import (
     partition_non_overlapping_waves,
     paste_image_region,
 )
+from core.image.glow_detection import MAX_GLOW_RING_EXTENT, detect_glow_halo
 from core.scaling import scale_area, scale_kernel, scale_scalar
 from utils.exceptions import CleaningError, ImageProcessingError, ValidationError
 from utils.logging import log_message
@@ -257,7 +258,7 @@ def process_single_bubble(
         image_bgr (numpy.ndarray): BGR image for text color sampling
 
     Returns:
-        tuple: (final_mask, fill_color_bgr, is_colored, sample_color_bgr, text_bbox, text_color_bgr)
+        tuple: (final_mask, fill_color_bgr, is_colored, sample_color_bgr, text_bbox, text_color_bgr, text_median_line_height, glow_color_rgb, glow_radius)
 
     Raises:
         CleaningError: If processing fails
@@ -371,6 +372,8 @@ def process_single_bubble(
         )
 
         text_bbox = None
+        text_line_count = 0
+        text_median_line_height = None
         if valid_contours:
             validated_mask = np.zeros((img_height, img_width), dtype=np.uint8)
             cv2.drawContours(
@@ -387,8 +390,30 @@ def process_single_bubble(
                 cv2.drawContours(
                     final_mask, [largest_contour], -1, 255, thickness=cv2.FILLED
                 )
-                x, y, w, h = cv2.boundingRect(largest_contour)
-                text_bbox = (x, y, x + w, y + h)
+                # text_bbox is meant to describe the *whole* text block (all
+                # lines), not just the single largest connected component.
+                # When a bubble has multiple lines separated by gaps, each
+                # line is its own external contour here - use the union of
+                # ALL boundary contours' bounding boxes so multi-line text
+                # isn't silently truncated to one line. (final_mask above is
+                # left as the single largest contour; it's only used for the
+                # colored-bubble sampling logic below, not for this bbox.)
+                per_contour_rects = [cv2.boundingRect(c) for c in boundary_contours]
+                bx1 = min(r[0] for r in per_contour_rects)
+                by1 = min(r[1] for r in per_contour_rects)
+                bx2 = max(r[0] + r[2] for r in per_contour_rects)
+                by2 = max(r[1] + r[3] for r in per_contour_rects)
+                text_bbox = (bx1, by1, bx2, by2)
+                # Median single-line height across contours, for font-size
+                # estimation (core.pipeline.estimate_target_font_size_from_bbox).
+                # More robust than dividing the whole block height by a line
+                # count: unaffected by inter-line gap size and by contours
+                # that are stray punctuation/accents rather than full lines.
+                if per_contour_rects:
+                    text_line_count = len(per_contour_rects)
+                    text_median_line_height = float(
+                        np.median([r[3] for r in per_contour_rects])
+                    )
 
                 if classify_colored:
                     # Sample bubble interior excluding exact text pixels and outline to determine if colored
@@ -464,6 +489,8 @@ def process_single_bubble(
                         )
 
                 text_color_bgr = None
+                glow_color_rgb = None
+                glow_radius = 0.0
                 if image_bgr is not None:
                     text_mask = cv2.bitwise_and(
                         cv2.bitwise_not(thresholded_roi), shrunk_roi_mask
@@ -497,6 +524,43 @@ def process_single_bubble(
                         else:
                             text_color_bgr = sampled_bgr
 
+                    if text_pixels_bgr.size > 0:
+                        # Glow needs room around the ink for the halo to
+                        # actually be sampled - crop a padded region around
+                        # the raw text_mask (not the eroded sample_mask,
+                        # which is intentionally shrunk inward) and hand it
+                        # to the shared detector along with the bubble's own
+                        # background color as the reference to fade into.
+                        text_ys, text_xs = np.where(text_mask == 255)
+                        if text_ys.size > 0:
+                            pad = MAX_GLOW_RING_EXTENT
+                            gx0 = max(0, int(text_xs.min()) - pad)
+                            gy0 = max(0, int(text_ys.min()) - pad)
+                            gx1 = min(img_width, int(text_xs.max()) + 1 + pad)
+                            gy1 = min(img_height, int(text_ys.max()) + 1 + pad)
+                            glow_crop_bgr = image_bgr[gy0:gy1, gx0:gx1]
+                            glow_ink_mask = text_mask[gy0:gy1, gx0:gx1]
+                            if glow_crop_bgr.size > 0:
+                                glow_crop_rgb = cv2.cvtColor(
+                                    glow_crop_bgr, cv2.COLOR_BGR2RGB
+                                )
+                                bg_ref_bgr = (
+                                    sample_color_bgr
+                                    if sample_color_bgr
+                                    else fill_color_bgr
+                                )
+                                bg_ref_rgb = (
+                                    bg_ref_bgr[2],
+                                    bg_ref_bgr[1],
+                                    bg_ref_bgr[0],
+                                )
+                                glow_info = detect_glow_halo(
+                                    glow_crop_rgb, glow_ink_mask, bg_ref_rgb
+                                )
+                                if glow_info:
+                                    glow_color_rgb = glow_info["color"]
+                                    glow_radius = glow_info["radius"]
+
                 return (
                     final_mask,
                     fill_color_bgr,
@@ -504,6 +568,9 @@ def process_single_bubble(
                     sample_color_bgr,
                     text_bbox,
                     text_color_bgr,
+                    text_median_line_height,
+                    glow_color_rgb,
+                    glow_radius,
                 )
 
         raise CleaningError("Failed to process bubble mask")
@@ -648,6 +715,9 @@ def clean_speech_bubbles(
             sample_color_bgr: Optional[tuple[int, int, int]] = None
             text_bbox: Optional[tuple[int, int, int, int]] = None
             text_color_bgr: Optional[tuple[int, int, int]] = None
+            text_median_line_height: Optional[float] = None
+            glow_color_rgb: Optional[tuple[int, int, int]] = None
+            glow_radius: float = 0.0
             base_mask = None
             is_sam_mask = False
 
@@ -663,6 +733,9 @@ def clean_speech_bubbles(
                         sample_color_bgr,
                         text_bbox,
                         text_color_bgr,
+                        text_median_line_height,
+                        glow_color_rgb,
+                        glow_radius,
                     ) = process_single_bubble(
                         base_mask,
                         img_gray,
@@ -712,6 +785,8 @@ def clean_speech_bubbles(
                             is_colored_bubble = retry_res["is_colored"]
                             text_bbox = retry_res["text_bbox"]
                             text_color_bgr = retry_res.get("text_color_bgr")
+                            glow_color_rgb = retry_res.get("glow_color_rgb")
+                            glow_radius = retry_res.get("glow_radius", 0.0)
                             retry_success = True
                             log_message(
                                 f"Otsu retry successful for {detection.get('bbox')}",
@@ -761,6 +836,9 @@ def clean_speech_bubbles(
                         sample_color_bgr,
                         text_bbox,
                         text_color_bgr,
+                        text_median_line_height,
+                        glow_color_rgb,
+                        glow_radius,
                     ) = process_single_bubble(
                         base_mask,
                         img_gray,
@@ -811,6 +889,8 @@ def clean_speech_bubbles(
                             is_colored_bubble = retry_res["is_colored"]
                             text_bbox = retry_res["text_bbox"]
                             text_color_bgr = retry_res.get("text_color_bgr")
+                            glow_color_rgb = retry_res.get("glow_color_rgb")
+                            glow_radius = retry_res.get("glow_radius", 0.0)
                             retry_success = True
                             log_message(
                                 f"Otsu retry successful for {detection.get('bbox')}",
@@ -839,6 +919,9 @@ def clean_speech_bubbles(
                         "is_colored": is_colored_bubble,
                         "text_bbox": text_bbox,
                         "text_color_bgr": text_color_bgr,
+                        "text_median_line_height": text_median_line_height,
+                        "glow_color_rgb": glow_color_rgb,
+                        "glow_radius": glow_radius,
                         "is_sam": is_sam_mask,
                         "inpainted": False,
                     }
@@ -1160,6 +1243,9 @@ def retry_cleaning_with_otsu(
         sample_color_bgr,
         text_bbox,
         text_color_bgr,
+        text_median_line_height,
+        glow_color_rgb,
+        glow_radius,
     ) = result
 
     bubble_color = sample_color_bgr if sample_color_bgr else fill_color_bgr
@@ -1177,5 +1263,8 @@ def retry_cleaning_with_otsu(
         "is_colored": is_colored_bubble,
         "text_bbox": text_bbox,
         "text_color_bgr": text_color_bgr,
+        "text_median_line_height": text_median_line_height,
+        "glow_color_rgb": glow_color_rgb,
+        "glow_radius": glow_radius,
         "is_sam": bubble_info.get("is_sam", False),
     }

@@ -240,7 +240,12 @@ def render_text_skia(
             if _hb_face:
                 preload_hb_faces[style_key] = _hb_face
 
-    def _find_layout(use_vertical_stack: bool) -> dict:
+    def _find_layout(
+        use_vertical_stack: bool, size_cap: Optional[int] = None
+    ) -> dict:
+        effective_max = config.max_font_size
+        if size_cap is not None:
+            effective_max = max(config.min_font_size, min(config.max_font_size, size_cap))
         return find_optimal_layout(
             layout_text,
             max_render_width,
@@ -250,7 +255,7 @@ def render_text_skia(
             preload_hb_faces,
             features_to_enable,
             config.min_font_size,
-            config.max_font_size,
+            effective_max,
             config.line_spacing_mult,
             False if use_vertical_stack else config.hyphenate_before_scaling,
             config.hyphen_penalty,
@@ -264,8 +269,62 @@ def render_text_skia(
             use_vertical_stack,
         )
 
+    def _find_layout_matching_style(use_vertical_stack: bool) -> dict:
+        """Try to render at config.target_font_size (± tolerance) before
+        falling back to the normal max-fit search. Reuses find_optimal_layout
+        unchanged - just narrows the size range it searches."""
+        target = config.target_font_size
+        tolerance = max(0.0, min(1.0, config.target_font_size_tolerance))
+        target_int = int(round(target))
+        min_tolerated = max(config.min_font_size, int(round(target * (1.0 - tolerance))))
+
+        if target_int >= config.min_font_size:
+            try:
+                # Search only within [min_tolerated, target_int]: this finds
+                # the largest size <= target that fits, i.e. the original
+                # size if it fits, or the closest size within tolerance.
+                return find_optimal_layout(
+                    layout_text,
+                    max_render_width,
+                    max_render_height,
+                    regular_hb_face,
+                    regular_typeface,
+                    preload_hb_faces,
+                    features_to_enable,
+                    min_tolerated,
+                    max(min_tolerated, target_int),
+                    config.line_spacing_mult,
+                    False if use_vertical_stack else config.hyphenate_before_scaling,
+                    config.hyphen_penalty,
+                    config.hyphenation_min_word_length,
+                    config.badness_exponent,
+                    verbose,
+                    bubble_id,
+                    cleaned_mask,
+                    layout_box_top_left,
+                    config.detach_trailing_punctuation,
+                    use_vertical_stack,
+                )
+            except RenderingError:
+                log_message(
+                    f"Target size {target_int} (tolerance {tolerance:.0%}) "
+                    "didn't fit, falling back to max-fit layout",
+                    verbose=verbose,
+                )
+
+        # Fallback: normal behavior, unchanged.
+        return _find_layout(use_vertical_stack)
+
+    use_style_match = (
+        config.target_font_size is not None and config.target_font_size > 0
+    )
+
     try:
-        layout_data = _find_layout(vertical_stack)
+        layout_data = (
+            _find_layout_matching_style(vertical_stack)
+            if use_style_match
+            else _find_layout(vertical_stack)
+        )
     except RenderingError as e:
         if not (
             config.auto_vertical_text
@@ -355,6 +414,17 @@ def render_text_skia(
         except Exception:
             text_color = skia.ColorBLACK
 
+    skia_glow_color = None
+    glow_radius_px = 0.0
+    if (
+        getattr(config, "glow_color", None) is not None
+        and getattr(config, "glow_radius", 0.0)
+        and config.glow_radius > 0
+    ):
+        gr, gg, gb = config.glow_color
+        skia_glow_color = skia.Color(gr, gg, gb)
+        glow_radius_px = float(config.glow_radius)
+
     skia_bg_color = None
     if text_background_color is not None:
         skia_bg_color = skia.Color(
@@ -362,19 +432,6 @@ def render_text_skia(
             text_background_color[1],
             text_background_color[2],
         )
-
-    # Styles copied off the original lettering. Left as None when nothing was
-    # measured, which lets the drawing engine keep its own automatic choices.
-    outline_color = None
-    if getattr(config, "outline_color_rgb", None) is not None:
-        outline_color = skia.Color(*config.outline_color_rgb[:3])
-
-    glow_color = None
-    glow_radius = float(getattr(config, "glow_radius", 0.0) or 0.0)
-    if getattr(config, "glow_color_rgb", None) is not None and glow_radius > 0:
-        glow_color = skia.Color(*config.glow_color_rgb[:3])
-    else:
-        glow_radius = 0.0
 
     # Apply supersampling if enabled
     if config.supersampling_factor > 1:
@@ -501,11 +558,9 @@ def render_text_skia(
                 else 0.0
             ),
             text_background_color=skia_bg_color,
-            outline_color=outline_color,
-            glow_color=glow_color,
-            glow_radius=glow_radius * factor,  # Scale the halo with the canvas
+            glow_color=skia_glow_color,
+            glow_radius=glow_radius_px * factor,
         )
-
 
         if not success:
             log_message("Drawing failed", always_print=True)
@@ -571,9 +626,8 @@ def render_text_skia(
                 else 0.0
             ),
             text_background_color=skia_bg_color,
-            outline_color=outline_color,
-            glow_color=glow_color,
-            glow_radius=glow_radius,
+            glow_color=skia_glow_color,
+            glow_radius=glow_radius_px,
         )
 
         if not success:

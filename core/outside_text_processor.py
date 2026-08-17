@@ -19,6 +19,10 @@ from core.batch_coordinator import (
     paste_image_region,
 )
 from core.config import MangaTranslatorConfig
+from core.image.glow_detection import (
+    MAX_GLOW_RING_EXTENT,
+    detect_glow_halo,
+)
 from core.image.image_utils import cv2_to_pil, pil_to_cv2, process_bubble_image_cached
 from core.image.inpainting import (
     FluxKleinInpainter,
@@ -184,8 +188,12 @@ def _apply_inpaint_render_metadata(
     outside_text_data: List[Dict[str, Any]],
     extracted_text_colors: dict,
     none_skipped_clip_bboxes: set,
+    extracted_text_median_line_heights: Optional[dict] = None,
+    extracted_text_glow: Optional[dict] = None,
 ) -> None:
     """Update existing OSB entries in-place with render-only fields from inpainting."""
+    extracted_text_median_line_heights = extracted_text_median_line_heights or {}
+    extracted_text_glow = extracted_text_glow or {}
     for item in outside_text_data:
         raw_bbox_tuple = item.get("original_bbox")
         bbox = item.get("bbox")
@@ -205,6 +213,63 @@ def _apply_inpaint_render_metadata(
                     and key[1] <= bcy <= key[3]
                 ):
                     item["text_color_rgb"] = color
+                    break
+
+        # Same lookup pattern as text_color_rgb above, for the median
+        # per-line ink height used by "Copy Original Text Style" font-size
+        # matching (see estimate_target_font_size_from_line_height).
+        if (
+            raw_bbox_tuple is not None
+            and raw_bbox_tuple in extracted_text_median_line_heights
+        ):
+            item["text_median_line_height"] = extracted_text_median_line_heights[
+                raw_bbox_tuple
+            ]
+        elif (
+            item.get("text_median_line_height") is None
+            and extracted_text_median_line_heights
+            and bbox
+        ):
+            x1, y1, x2, y2 = bbox
+            bcx, bcy = (x1 + x2) / 2, (y1 + y2) / 2
+            for key, height in extracted_text_median_line_heights.items():
+                if key == raw_bbox_tuple or key == bbox:
+                    item["text_median_line_height"] = height
+                    break
+                if (
+                    isinstance(key, tuple)
+                    and len(key) == 4
+                    and key[0] <= bcx <= key[2]
+                    and key[1] <= bcy <= key[3]
+                ):
+                    item["text_median_line_height"] = height
+                    break
+
+        # Same lookup pattern again for detected glow/halo info.
+        if raw_bbox_tuple is not None and raw_bbox_tuple in extracted_text_glow:
+            glow = extracted_text_glow[raw_bbox_tuple]
+            item["glow_color_rgb"] = glow["color"]
+            item["glow_radius"] = glow["radius"]
+        elif (
+            item.get("glow_color_rgb") is None
+            and extracted_text_glow
+            and bbox
+        ):
+            x1, y1, x2, y2 = bbox
+            bcx, bcy = (x1 + x2) / 2, (y1 + y2) / 2
+            for key, glow in extracted_text_glow.items():
+                if key == raw_bbox_tuple or key == bbox:
+                    item["glow_color_rgb"] = glow["color"]
+                    item["glow_radius"] = glow["radius"]
+                    break
+                if (
+                    isinstance(key, tuple)
+                    and len(key) == 4
+                    and key[0] <= bcx <= key[2]
+                    and key[1] <= bcy <= key[3]
+                ):
+                    item["glow_color_rgb"] = glow["color"]
+                    item["glow_radius"] = glow["radius"]
                     break
 
         needs_text_bg = False
@@ -368,6 +433,22 @@ def prepare_outside_text_work(
         area_ratio_threshold = getattr(
             config.outside_text, "osb_render_expansion_area_ratio_threshold", 0.005
         )
+        # Wide, short "banner" boxes (title cards like "YIFAN ZHUO / THE DEMON
+        # KING") have a large aspect_ratio (width >> height) so they never
+        # trip the narrow-tall check above, and they can still be tiny in
+        # area yet fall right at/above the area_ratio_threshold on some
+        # pages. They still need expansion because the detector's bbox
+        # frequently hugs only the densest cluster of glyphs and clips
+        # taller/stylized letters (e.g. drop-shadow'd or oversized initial
+        # letters), leaving stray fragments behind after inpaint. Treat any
+        # box whose aspect_ratio is >= the inverse of the narrow threshold
+        # (i.e. just as extreme in the opposite direction) as needing the
+        # same "tiny" expansion treatment.
+        wide_banner_ratio_threshold = getattr(
+            config.outside_text,
+            "osb_render_expansion_wide_banner_ratio_threshold",
+            1.0 / max(aspect_ratio_threshold, 0.01),
+        )
         if max(narrow_expansion_mult, tiny_expansion_mult) > 1.0:
             log_message(
                 "Expanding OSB bboxes "
@@ -384,10 +465,11 @@ def prepare_outside_text_work(
                 aspect_ratio = float(w) / float(max(1, h))
                 area_ratio = (w * h) / float(max(1, img_w * img_h))
                 is_narrow_tall = aspect_ratio <= aspect_ratio_threshold
+                is_wide_banner = aspect_ratio >= wide_banner_ratio_threshold
                 is_tiny = area_ratio < area_ratio_threshold
 
                 expansion_mult = 1.0
-                if is_narrow_tall:
+                if is_narrow_tall or is_wide_banner:
                     expansion_mult = max(expansion_mult, narrow_expansion_mult)
                 if is_tiny:
                     expansion_mult = max(expansion_mult, tiny_expansion_mult)
@@ -741,6 +823,8 @@ def finish_outside_text_work(
     outside_text_data = work.outside_text_data
 
     extracted_text_colors = {}
+    extracted_text_median_line_heights = {}
+    extracted_text_glow = {}
     none_skipped_clip_bboxes = set()
     current_image = pil_image
 
@@ -935,6 +1019,18 @@ def finish_outside_text_work(
                 )
 
                 extracted_text_colors = {}
+                # Per-region median single-line ink height, measured from the
+                # same post-inpaint contrast mask used for text-color
+                # extraction below. Mirrors cleaning.py's
+                # text_median_line_height for speech bubbles - lets OSB text
+                # (titles/SFX) participate in "Copy Original Text Style"
+                # font-size matching (core.pipeline.
+                # estimate_target_font_size_from_line_height).
+                extracted_text_median_line_heights = {}
+                # Per-region detected soft glow/halo (color + radius), from
+                # the same clean_mask/bg_rgb used for color extraction below.
+                # See core.image.glow_detection.detect_glow_halo.
+                extracted_text_glow = {}
                 flux_inpaints = 0
                 cv2_inpaints = 0
                 none_skips = 0
@@ -1336,11 +1432,65 @@ def finish_outside_text_work(
                                     )
                                     clean_mask = np.zeros_like(contrast_mask)
                                     MIN_COMPONENT_AREA = 4
+                                    kept_contours = []
                                     for cnt in contours:
                                         if cv2.contourArea(cnt) >= MIN_COMPONENT_AREA:
                                             cv2.drawContours(
                                                 clean_mask, [cnt], -1, 255, cv2.FILLED
                                             )
+                                            kept_contours.append(cnt)
+
+                                    if kept_contours:
+                                        # Same approach as cleaning.py's bubble
+                                        # text_bbox measurement: median height
+                                        # of each glyph-cluster's bounding
+                                        # rect approximates a single line's
+                                        # ink height, robust to inter-line
+                                        # gaps and stray small components.
+                                        contour_heights = [
+                                            cv2.boundingRect(c)[3]
+                                            for c in kept_contours
+                                        ]
+                                        extracted_text_median_line_heights[
+                                            composite_clip_bbox
+                                        ] = float(np.median(contour_heights))
+
+                                    # Glow/halo detection needs room around
+                                    # the text ink for the halo to actually
+                                    # show up in - crop_rgb above is cropped
+                                    # tight to the text bbox (rx0..ry1), so
+                                    # re-crop with extra margin and place the
+                                    # already-computed clean_mask into it at
+                                    # the matching offset.
+                                    if kept_contours:
+                                        pad = MAX_GLOW_RING_EXTENT
+                                        gx0 = max(0, rx0 - pad)
+                                        gy0 = max(0, ry0 - pad)
+                                        gx1 = min(img_w, rx1 + pad)
+                                        gy1 = min(img_h, ry1 + pad)
+                                        glow_crop_rgb = np.array(
+                                            pil_image.crop(
+                                                (gx0, gy0, gx1, gy1)
+                                            ).convert("RGB")
+                                        )
+                                        glow_ink_mask = np.zeros(
+                                            glow_crop_rgb.shape[:2], dtype=np.uint8
+                                        )
+                                        off_x = rx0 - gx0
+                                        off_y = ry0 - gy0
+                                        glow_ink_mask[
+                                            off_y : off_y + clean_mask.shape[0],
+                                            off_x : off_x + clean_mask.shape[1],
+                                        ] = clean_mask
+                                        glow_info = detect_glow_halo(
+                                            glow_crop_rgb,
+                                            glow_ink_mask,
+                                            tuple(int(c) for c in bg_rgb),
+                                        )
+                                        if glow_info:
+                                            extracted_text_glow[
+                                                composite_clip_bbox
+                                            ] = glow_info
 
                                     text_pixels_rgb = crop_rgb[clean_mask == 255]
                                     if len(text_pixels_rgb) >= 10:
@@ -1895,6 +2045,8 @@ def finish_outside_text_work(
             outside_text_data,
             extracted_text_colors,
             none_skipped_clip_bboxes,
+            extracted_text_median_line_heights,
+            extracted_text_glow,
         )
         return current_image, outside_text_data
 
