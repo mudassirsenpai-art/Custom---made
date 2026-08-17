@@ -299,30 +299,61 @@ def process_single_bubble(
         roi_indices = roi_mask == 255
         roi_gray[roi_indices] = img_gray[roi_indices]
 
-        # Invert for black bubbles to detect text properly
+        # Black bubbles are normally dark fill + dark-ish outline text, so
+        # inverting first makes Otsu's "brighter half = foreground" default
+        # pick out the text. But some black "bubbles" are actually bright
+        # text directly on a black background (e.g. a misdetected title
+        # card) - there the un-inverted image already has text as the
+        # bright minority, and inverting instead flips the vast black
+        # background into "foreground", drowning out the real text. Try the
+        # black-bubble invert first, then fall back to no-invert if the
+        # result looks like it selected the background instead of the
+        # (necessarily minority) text region.
+        TEXT_AREA_MAJORITY_RATIO = 0.45  # real glyph ink is never this much of the ROI
+
+        def _threshold_roi(source_gray: np.ndarray) -> np.ndarray:
+            if use_otsu_threshold:
+                roi_pixels_for_otsu = source_gray[roi_indices]
+                thresh_val, _ = cv2.threshold(
+                    roi_pixels_for_otsu, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                )
+                log_message(
+                    f"{'[SAM]' if is_sam else ''}  Otsu threshold: {thresh_val}",
+                    verbose=verbose,
+                )
+                _, result = cv2.threshold(
+                    source_gray, thresh_val, 255, cv2.THRESH_BINARY
+                )
+            else:
+                _, result = cv2.threshold(
+                    source_gray, thresholding_value, 255, cv2.THRESH_BINARY
+                )
+            return result
+
         roi_for_thresholding = (
             cv2.bitwise_not(roi_gray) if is_black_bubble else roi_gray
         )
-        thresholded_roi = np.zeros_like(img_gray)
-
-        if use_otsu_threshold:
-            roi_pixels_for_otsu = roi_for_thresholding[roi_indices]
-            thresh_val, _ = cv2.threshold(
-                roi_pixels_for_otsu, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-            )
-            log_message(
-                f"{'[SAM]' if is_sam else ''}  Otsu threshold: {thresh_val}",
-                verbose=verbose,
-            )
-            _, thresholded_roi = cv2.threshold(
-                roi_for_thresholding, thresh_val, 255, cv2.THRESH_BINARY
-            )
-        else:
-            _, thresholded_roi = cv2.threshold(
-                roi_for_thresholding, thresholding_value, 255, cv2.THRESH_BINARY
-            )
-
+        thresholded_roi = _threshold_roi(roi_for_thresholding)
         thresholded_roi = cv2.bitwise_and(thresholded_roi, roi_mask)
+
+        if is_black_bubble:
+            roi_pixel_count = int(np.count_nonzero(roi_mask))
+            selected_count = int(np.count_nonzero(thresholded_roi))
+            if (
+                roi_pixel_count > 0
+                and selected_count / roi_pixel_count > TEXT_AREA_MAJORITY_RATIO
+            ):
+                log_message(
+                    f"{'[SAM]' if is_sam else ''}  Black-bubble invert selected "
+                    f"{selected_count / roi_pixel_count:.0%} of the region (looks "
+                    "like background, not text) - retrying without invert",
+                    verbose=verbose,
+                )
+                fallback_thresholded = _threshold_roi(roi_gray)
+                fallback_thresholded = cv2.bitwise_and(fallback_thresholded, roi_mask)
+                fallback_count = int(np.count_nonzero(fallback_thresholded))
+                if fallback_count < selected_count:
+                    thresholded_roi = fallback_thresholded
 
         if neighbor_bboxes and detection_bbox is not None:
             shrunk_roi_mask = _build_adaptive_shrink_mask(
