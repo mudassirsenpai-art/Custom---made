@@ -1584,9 +1584,18 @@ def finish_outside_text_work(
 
                                     force_fill = inpainting_method in ("opencv", "lama", "lama_large")
 
-                                    # Simply check if the expanded boundary is solid color
+                                    # Simply check if the expanded boundary is solid color.
+                                    # Run this check for ALL methods (including opencv/lama/
+                                    # lama_large) — a genuinely solid black/white background
+                                    # should always get a perfect flat fill instead of being
+                                    # routed through texture inpainting, which can introduce
+                                    # a grey/blended tint on uniform regions (e.g. LaMa
+                                    # averaging a solid black panel toward mid-grey when its
+                                    # context padding still contains any non-black pixels,
+                                    # or even on pages where the padding is fully black but
+                                    # the model just doesn't reconstruct flat color perfectly).
                                     expanded_is_solid = False
-                                    if not force_fill:
+                                    if True:
                                         ex_sx1 = max(0, p_x0 - expansion_px)
                                         ex_sy1 = max(0, p_y0 - expansion_px)
                                         ex_sx2 = min(img_w, p_x1 + expansion_px)
@@ -1632,10 +1641,11 @@ def finish_outside_text_work(
 
                                     # Only use a flat color fill when the region is a
                                     # genuinely solid-color background (detected via the
-                                    # border sampling above). "opencv"/"lama" method
-                                    # regions that are NOT solid go through real texture
-                                    # inpainting below instead of a flat rectangle, so
-                                    # OSB text over artwork doesn't get covered by a box.
+                                    # border sampling above, now checked for every method
+                                    # including opencv/lama/lama_large). Non-solid regions
+                                    # on "opencv"/"lama" methods still go through real
+                                    # texture inpainting below instead of a flat rectangle,
+                                    # so OSB text over artwork doesn't get covered by a box.
                                     should_simple_fill = expanded_is_solid
 
                                     if should_simple_fill:
