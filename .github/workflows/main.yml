@@ -1,0 +1,33 @@
+name: Extract and Cleanup Workflow
+
+on:
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  extract-and-clean:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 1: Delete all old files except the ZIP archive
+      - name: Step 1 - Remove old files except ZIP
+        run: |
+          echo "Cleaning up old files..."
+          find . -maxdepth 1 -mindepth 1 ! -name 'Custom---made-main.zip' ! -name '.git' ! -name '.github' -exec rm -rf {} +
+
+      # Step 2: Grant permissions and extract the ZIP file
+      - name: Step 2 - Grant permissions and extract
+        run: |
+          echo "Granting permissions..."
+          chmod -R 777 .
+          echo "Extracting Custom---made-main.zip..."
+          unzip -o Custom---made-main.zip
+
+      # Step 3: Remove the original ZIP and the workflow YAML
+      - name: Step 3 - Delete ZIP and workflow file
+        run: |
+          echo "Removing ZIP file and workflow..."
+          rm -f Custom---made-main.zip
+          rm -f .github/workflows/*.yml
