@@ -1,33 +1,53 @@
-name: Extract and Cleanup Workflow
+name: Extract and Push Changes
 
 on:
-  workflow_dispatch: # Allows manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
-  extract-and-clean:
+  extract-and-commit:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # Step 1: Delete all old files except the ZIP archive
-      - name: Step 1 - Remove old files except ZIP
+      # Step 1: Check if ZIP exists, download if missing from URL
+      - name: Ensure ZIP file exists
         run: |
-          echo "Cleaning up old files..."
+          if [ ! -f "Custom---made-main.zip" ]; then
+            echo "ZIP not found locally. Downloading..."
+            curl -L -o Custom---made-main.zip "https://github.com/mudassirsenpai-art/Custom---made/raw/main/Custom---made-main.zip"
+          fi
+
+      # Step 2: Delete old files/folders except ZIP, .git, and .github
+      - name: Step 1 - Delete old contents
+        run: |
+          echo "Deleting old contents..."
           find . -maxdepth 1 -mindepth 1 ! -name 'Custom---made-main.zip' ! -name '.git' ! -name '.github' -exec rm -rf {} +
 
-      # Step 2: Grant permissions and extract the ZIP file
-      - name: Step 2 - Grant permissions and extract
+      # Step 3: Extract ZIP with full permissions
+      - name: Step 2 - Grant permissions and Extract
         run: |
-          echo "Granting permissions..."
           chmod -R 777 .
-          echo "Extracting Custom---made-main.zip..."
           unzip -o Custom---made-main.zip
+          # If extracted into a subfolder, move everything to root
+          if [ -d "Custom---made-main" ]; then
+            mv Custom---made-main/* . 2>/dev/null || true
+            rm -rf Custom---made-main
+          fi
 
-      # Step 3: Remove the original ZIP and the workflow YAML
-      - name: Step 3 - Delete ZIP and workflow file
+      # Step 4: Delete ZIP file
+      - name: Step 3 - Delete ZIP file
         run: |
-          echo "Removing ZIP file and workflow..."
           rm -f Custom---made-main.zip
-          rm -f .github/workflows/*.yml
+
+      # Step 5: Save changes back to GitHub repo permanently
+      - name: Step 4 - Commit and Push back to GitHub
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Auto-extracted zip contents and cleaned up" || echo "No changes to commit"
+          git push origin HEAD:${{ github.ref_name }}
