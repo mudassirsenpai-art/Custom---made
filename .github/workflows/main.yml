@@ -1,7 +1,10 @@
-name: Extract and Push Changes
+name: Extract and Commit
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   extract-and-commit:
@@ -12,8 +15,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Step 1: Check if ZIP exists, download if missing from URL
+      # Step 1: Download ZIP if missing
       - name: Ensure ZIP file exists
         run: |
           if [ ! -f "Custom---made-main.zip" ]; then
@@ -21,30 +25,31 @@ jobs:
             curl -L -o Custom---made-main.zip "https://github.com/mudassirsenpai-art/Custom---made/raw/main/Custom---made-main.zip"
           fi
 
-      # Step 2: Delete old files/folders except ZIP, .git, and .github
+      # Step 2: Clear old files except ZIP and git directories
       - name: Step 1 - Delete old contents
         run: |
           echo "Deleting old contents..."
           find . -maxdepth 1 -mindepth 1 ! -name 'Custom---made-main.zip' ! -name '.git' ! -name '.github' -exec rm -rf {} +
 
-      # Step 3: Extract ZIP with full permissions
+      # Step 3: Extract ZIP and adjust directory structure
       - name: Step 2 - Grant permissions and Extract
         run: |
           chmod -R 777 .
           unzip -o Custom---made-main.zip
-          # If extracted into a subfolder, move everything to root
           if [ -d "Custom---made-main" ]; then
             mv Custom---made-main/* . 2>/dev/null || true
             rm -rf Custom---made-main
           fi
 
-      # Step 4: Delete ZIP file
+      # Step 4: Delete the ZIP file
       - name: Step 3 - Delete ZIP file
         run: |
           rm -f Custom---made-main.zip
 
-      # Step 5: Save changes back to GitHub repo permanently
+      # Step 5: Commit and Push changes back to main branch
       - name: Step 4 - Commit and Push back to GitHub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
