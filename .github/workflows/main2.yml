@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: write    # Git commit aur push karne ke liye zaroori permission
+  workflows: write   # Zip ke andar .github/workflows/ files hain, isliye ye permission bhi chahiye
 
 jobs:
   clean-and-extract:
