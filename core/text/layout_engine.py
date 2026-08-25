@@ -812,8 +812,12 @@ def find_optimal_layout(
             high = mid - 1
 
     if best_fit_size == -1:
+        bubble_desc = f"bubble {bubble_id}" if bubble_id else "bubble"
+        box_desc = f" at {box_top_left}" if box_top_left else ""
         log_message(
-            f"Text too large for bubble at min size {min_font_size}: '{clean_text[:30]}'",
+            f"Text too large for {bubble_desc}{box_desc} "
+            f"(box {max_render_width:.0f}x{max_render_height:.0f}px) "
+            f"at min size {min_font_size}: '{clean_text[:30]}'",
             always_print=True,
         )
         raise RenderingError(

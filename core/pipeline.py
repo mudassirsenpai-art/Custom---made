@@ -1391,6 +1391,7 @@ def translate_and_render(
             osb_text_verification=config.detection.use_osb_text_verification,
             osb_text_hf_token=config.outside_text.huggingface_token,
             bubble_detector_model=config.detection.bubble_detector_model,
+            iou_duplicate_threshold=config.detection.iou_duplicate_threshold,
         )
     except Exception as e:
         log_message(f"Error during detection: {e}", always_print=True)

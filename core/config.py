@@ -19,6 +19,11 @@ class DetectionConfig:
     conjoined_detection: bool = True
     use_panel_sorting: bool = True
     use_osb_text_verification: bool = True
+    # IoU threshold above which two detected bubble boxes are treated as
+    # duplicates (lower-confidence one dropped entirely). Raising this makes
+    # dedup less aggressive so close-but-distinct adjacent bubbles/captions
+    # don't get silently discarded.
+    iou_duplicate_threshold: float = 0.7
 
 
 @dataclass

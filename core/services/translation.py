@@ -935,14 +935,28 @@ def _parse_llm_response_unified(
 
         matches = pattern.findall(response_text)
         result_dict = {}
+        dropped_items = []
 
         for num_str, text in matches:
             try:
                 num = int(num_str)
                 if 1 <= num <= total_elements:
                     result_dict[num] = text.strip()
+                else:
+                    dropped_items.append((num, text.strip()))
             except ValueError:
                 continue
+
+        if dropped_items:
+            log_message(
+                f"WARNING: {provider} OCR/translation returned "
+                f"{len(dropped_items)} item(s) numbered beyond the "
+                f"{total_elements} detected bubble(s)/region(s) - these are "
+                "being dropped, likely because bubble/text detection missed "
+                "a real text region on this page: "
+                + "; ".join(f"item {n}: '{t[:40]}'" for n, t in dropped_items),
+                always_print=True,
+            )
 
         final_list = []
         for i in range(1, total_elements + 1):

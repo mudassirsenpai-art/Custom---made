@@ -483,6 +483,17 @@ def main():
         help="Confidence threshold for panel detection YOLO (0.0-1.0)",
     )
     parser.add_argument(
+        "--iou-duplicate-threshold",
+        type=float,
+        default=0.7,
+        help=(
+            "IoU threshold above which two detected bubble boxes are treated "
+            "as duplicates and the lower-confidence one is dropped (0.5-0.95). "
+            "Raise this if close/adjacent distinct bubbles are being silently "
+            "discarded as false duplicates."
+        ),
+    )
+    parser.add_argument(
         "--seg-model",
         dest="seg_model",
         type=str,
@@ -1447,6 +1458,7 @@ def main():
             seg_model=args.seg_model,
             bubble_detector_model=args.bubble_detector_model,
             conjoined_detection=args.conjoined_detection,
+            iou_duplicate_threshold=args.iou_duplicate_threshold,
         ),
         cleaning=CleaningConfig(
             thresholding_value=args.thresholding_value,

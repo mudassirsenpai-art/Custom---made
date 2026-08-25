@@ -16,7 +16,7 @@ from utils.logging import log_message
 IOA_THRESHOLD = 0.50  # 50% IoA threshold for conjoined bubble detection
 SAM_MASK_THRESHOLD = 0.5  # SAM2 mask binarization threshold
 IOA_OVERLAP_THRESHOLD = 0.5  # IoA threshold for general overlap detection between boxes
-IOU_DUPLICATE_THRESHOLD = 0.7  # IoU threshold for duplicate primary detection
+IOU_DUPLICATE_THRESHOLD = 0.7  # Default IoU threshold for duplicate primary detection (overridable via config)
 OSB_TEXT_MATCH_IOA_THRESHOLD = (
     0.2  # Minimum text-box overlap ratio for bubble assignment
 )
@@ -1274,6 +1274,7 @@ def detect_speech_bubbles(
     osb_text_verification: bool = False,
     osb_text_hf_token: str = "",
     bubble_detector_model: str = "yolo_2",
+    iou_duplicate_threshold: float = IOU_DUPLICATE_THRESHOLD,
 ):
     """Detect speech bubbles using primary YOLO and optional RT-DETR + SAM refinement.
 
@@ -1294,6 +1295,10 @@ def detect_speech_bubbles(
         bubble_detector_model (str): Which primary bubble detector to use
             ("yolo_1", "yolo_2", or "yolo_3"). Controls both model weights and
             inference image size (yolo_2 -> 1600, yolo_3 -> 1024, else 640).
+        iou_duplicate_threshold (float): IoU threshold above which two primary
+            detections are treated as duplicates (lower-confidence one is
+            dropped). Raise this to stop close-but-distinct adjacent
+            bubbles/captions from being discarded as false duplicates.
 
     Returns:
         tuple[list, list]: (speech bubble detections, text_free boxes from secondary model)
@@ -1364,7 +1369,7 @@ def detect_speech_bubbles(
     if len(primary_boxes) > 1:
         original_count = len(primary_boxes)
         primary_boxes, keep_indices = _deduplicate_primary_boxes(
-            primary_boxes, primary_results.boxes.conf, IOU_DUPLICATE_THRESHOLD
+            primary_boxes, primary_results.boxes.conf, iou_duplicate_threshold
         )
         primary_sources = [primary_sources[idx] for idx in keep_indices]
         if len(primary_boxes) < original_count:
