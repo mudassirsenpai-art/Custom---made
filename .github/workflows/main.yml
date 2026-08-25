@@ -17,12 +17,25 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Step 1: Download ZIP if missing
+      # Step 1: Download ZIP safely with headers and follow redirects
       - name: Ensure ZIP file exists
         run: |
-          if [ ! -f "Custom---made-main-wired.zip" ]; then
-            echo "ZIP not found locally. Downloading..."
-            curl -L -o Custom---made-main-wired.zip "https://github.com/mudassirsenpai-art/Custom---made/raw/main/Custom---made-main-wired.zip"
+          if [ ! -f "Custom---made-main-wired.zip" ] || [ ! -s "Custom---made-main-wired.zip" ]; then
+            echo "ZIP missing or empty. Downloading..."
+            curl -fSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                 -o Custom---made-main-wired.zip \
+                 "https://raw.githubusercontent.com/mudassirsenpai-art/Custom---made/main/Custom---made-main-wired.zip" || \
+            curl -fSL -o Custom---made-main-wired.zip \
+                 "https://github.com/mudassirsenpai-art/Custom---made/raw/main/Custom---made-main-wired.zip"
+          fi
+
+      # Step 1.5: Validate if it's a real ZIP archive
+      - name: Verify ZIP Integrity
+        run: |
+          if ! file Custom---made-main-wired.zip | grep -q 'Zip archive data'; then
+            echo "::error::Downloaded file is NOT a valid ZIP archive! Displaying content preview:"
+            head -n 20 Custom---made-main-wired.zip
+            exit 1
           fi
 
       # Step 2: Clear old files except ZIP and git directories
