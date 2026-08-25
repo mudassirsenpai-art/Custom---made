@@ -1,4 +1,4 @@
-name: Extract and Commit
+Name: Extract and Commit
 
 on:
   workflow_dispatch:
@@ -20,23 +20,26 @@ jobs:
       # Step 1: Download ZIP if missing
       - name: Ensure ZIP file exists
         run: |
-          if [ ! -f "Custom---made-main.zip" ]; then
+          if [ ! -f "Custom---made-main-wired.zip" ]; then
             echo "ZIP not found locally. Downloading..."
-            curl -L -o Custom---made-main.zip "https://github.com/mudassirsenpai-art/Custom---made/raw/main/Custom---made-main.zip"
+            curl -L -o Custom---made-main-wired.zip "https://github.com/mudassirsenpai-art/Custom---made/raw/main/Custom---made-main-wired.zip"
           fi
 
       # Step 2: Clear old files except ZIP and git directories
       - name: Step 1 - Delete old contents
         run: |
           echo "Deleting old contents..."
-          find . -maxdepth 1 -mindepth 1 ! -name 'Custom---made-main.zip' ! -name '.git' ! -name '.github' -exec rm -rf {} +
+          find . -maxdepth 1 -mindepth 1 ! -name 'Custom---made-main-wired.zip' ! -name '.git' ! -name '.github' -exec rm -rf {} +
 
       # Step 3: Extract ZIP and adjust directory structure
       - name: Step 2 - Grant permissions and Extract
         run: |
           chmod -R 777 .
-          unzip -o Custom---made-main.zip
-          if [ -d "Custom---made-main" ]; then
+          unzip -o Custom---made-main-wired.zip
+          if [ -d "Custom---made-main-wired" ]; then
+            mv Custom---made-main-wired/* . 2>/dev/null || true
+            rm -rf Custom---made-main-wired
+          elif [ -d "Custom---made-main" ]; then
             mv Custom---made-main/* . 2>/dev/null || true
             rm -rf Custom---made-main
           fi
@@ -44,7 +47,7 @@ jobs:
       # Step 4: Delete the ZIP file
       - name: Step 3 - Delete ZIP file
         run: |
-          rm -f Custom---made-main.zip
+          rm -f Custom---made-main-wired.zip
 
       # Step 5: Commit and Push changes back to main branch
       - name: Step 4 - Commit and Push back to GitHub
