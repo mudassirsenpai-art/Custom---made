@@ -15,26 +15,33 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          lfs: true # 👈 SUPER IMPORTANT! Fetches the real zip if it's stored in Git LFS!
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Step 1: Download ZIP if missing
-      - name: Ensure ZIP file exists
+      # Step 1: Ensure ZIP exists and download securely if missing
+      - name: Ensure ZIP file exists and is valid
         run: |
           if [ ! -f "Custom---made-main-wired.zip" ]; then
-            echo "ZIP not found locally. Downloading..."
-            curl -fSL -o Custom---made-main-wired.zip \
-              "https://raw.githubusercontent.com/mudassirsenpai-art/Custom---made/main/Custom---made-main-wired.zip" || \
-            curl -fSL -o Custom---made-main-wired.zip \
-              "https://github.com/mudassirsenpai-art/Custom---made/raw/main/Custom---made-main-wired.zip"
+            echo "Downloading ZIP with Authentication..."
+            curl -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                 -fSL -o Custom---made-main-wired.zip \
+                 "https://raw.githubusercontent.com/mudassirsenpai-art/Custom---made/main/Custom---made-main-wired.zip"
+          fi
+          
+          # ANTI-CORRUPTION SHIELD: Check if it's a real ZIP!
+          if ! file Custom---made-main-wired.zip | grep -iq 'zip archive'; then
+            echo "::error::The file is NOT a valid zip! It might be a GitHub login page or an LFS pointer. Here is what it actually looks like:"
+            head -n 10 Custom---made-main-wired.zip
+            exit 1
           fi
 
-      # Step 2: Extract ZIP into temporary directory and adjust structure
+      # Step 2: Extract ZIP to Temporary Directory
       - name: Extract ZIP to Temporary Directory
         run: |
           mkdir -p /tmp/extracted_content
           unzip -o Custom---made-main-wired.zip -d /tmp/extracted_content
           
-          # Handle nested folder structure inside zip if present
+          # Fix nested folders
           if [ -d "/tmp/extracted_content/Custom---made-main-wired" ]; then
             mv /tmp/extracted_content/Custom---made-main-wired/* /tmp/extracted_content/ 2>/dev/null || true
             rm -rf /tmp/extracted_content/Custom---made-main-wired
@@ -49,7 +56,7 @@ jobs:
           echo "Deleting old contents..."
           find . -maxdepth 1 -mindepth 1 ! -name '.git' ! -name '.github' -exec rm -rf {} +
 
-      # Step 4: Move extracted contents into root and clean up temp folder
+      # Step 4: Deploy Extracted Contents
       - name: Deploy Extracted Contents
         run: |
           cp -rn /tmp/extracted_content/* . 2>/dev/null || true
