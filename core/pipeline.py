@@ -56,6 +56,7 @@ from .services.translation import (
     prepare_bubble_images_for_translation,
 )
 from .text.placeholders import generate_test_placeholders
+from .text.style_extraction import describe_style, resolve_style_overrides
 from .text.text_processing import supports_long_word_breaking
 from .text.text_renderer import render_text_skia
 
@@ -332,6 +333,7 @@ def _render_from_manual_checkpoint(
             "text_bbox": info.get("text_bbox"),
             "text_color_bgr": info.get("text_color_bgr"),
             "text_median_line_height": info.get("text_median_line_height"),
+            "lettering_style": info.get("lettering_style"),
         }
         for info in processed_bubbles_info
         if "bbox" in info and "color" in info and "mask" in info
@@ -382,6 +384,8 @@ def _render_from_manual_checkpoint(
         target_font_size = None
         glow_color = None
         glow_radius = 0.0
+        outline_color = None
+        outline_width_override = None
 
         if is_outside_text:
             if is_sfx and "original_crop_pil" in bubble:
@@ -485,6 +489,34 @@ def _render_from_manual_checkpoint(
                 if config.rendering.detect_glow:
                     glow_color = render_info.get("glow_color_rgb")
                     glow_radius = render_info.get("glow_radius") or 0.0
+                if config.rendering.match_original_style:
+                    style_overrides = resolve_style_overrides(
+                        render_info.get("lettering_style"),
+                        base_min_font=main_min_font,
+                        base_max_font=main_max_font,
+                        tolerance=config.rendering.match_original_style_tolerance,
+                    )
+                    if style_overrides:
+                        log_message(
+                            f"  - Lettering style {bbox}: "
+                            f"{describe_style(render_info.get('lettering_style'))} "
+                            f"-> {style_overrides.summary()}",
+                            verbose=verbose,
+                        )
+                        if style_overrides.text_color_rgb:
+                            text_color_rgb = style_overrides.text_color_rgb
+                        if style_overrides.outline_color_rgb and style_overrides.outline_width:
+                            outline_color = style_overrides.outline_color_rgb
+                            outline_width_override = style_overrides.outline_width
+                        if (
+                            style_overrides.glow_color_rgb
+                            and style_overrides.glow_radius
+                            and not glow_color
+                        ):
+                            glow_color = style_overrides.glow_color_rgb
+                            glow_radius = style_overrides.glow_radius
+                        if style_overrides.max_font_size:
+                            target_font_size = style_overrides.max_font_size
             vertical_stack = False
             rotation_deg = 0.0
 
@@ -512,7 +544,11 @@ def _render_from_manual_checkpoint(
             hyphenation_min_word_length=config.rendering.hyphenation_min_word_length,
             badness_exponent=config.rendering.badness_exponent,
             padding_pixels=padding_pixels,
-            outline_width=osb_outline_width if is_outside_text else 0.0,
+            outline_width=(
+                osb_outline_width
+                if is_outside_text
+                else (outline_width_override or 0.0)
+            ),
             supersampling_factor=config.rendering.supersampling_factor,
             detach_trailing_punctuation=config.rendering.detach_trailing_punctuation,
             auto_vertical_text=(
@@ -522,6 +558,7 @@ def _render_from_manual_checkpoint(
             target_font_size_tolerance=config.rendering.match_original_style_tolerance,
             glow_color=glow_color,
             glow_radius=glow_radius,
+            outline_color=outline_color if not is_outside_text else None,
         )
 
         success = False
@@ -2311,6 +2348,7 @@ def translate_and_render(
                         "text_median_line_height": info.get(
                             "text_median_line_height"
                         ),
+                        "lettering_style": info.get("lettering_style"),
                     }
                     for info in processed_bubbles_info
                     if "bbox" in info and "color" in info and "mask" in info
@@ -2391,6 +2429,8 @@ def translate_and_render(
                         target_font_size = None
                         glow_color = None
                         glow_radius = 0.0
+                        outline_color = None
+                        outline_width_override = None
                         if is_outside_text:
                             log_message(
                                 f"Rendering outside text {bbox}: '{text[:30]}...'",
@@ -2500,6 +2540,49 @@ def translate_and_render(
                                     glow_radius = (
                                         render_info.get("glow_radius") or 0.0
                                     )
+                                if config.rendering.match_original_style:
+                                    style_overrides = resolve_style_overrides(
+                                        render_info.get("lettering_style"),
+                                        base_min_font=main_min_font,
+                                        base_max_font=main_max_font,
+                                        tolerance=config.rendering.match_original_style_tolerance,
+                                    )
+                                    if style_overrides:
+                                        log_message(
+                                            f"  - Lettering style {bbox}: "
+                                            f"{describe_style(render_info.get('lettering_style'))} "
+                                            f"-> {style_overrides.summary()}",
+                                            verbose=verbose,
+                                        )
+                                        if style_overrides.text_color_rgb:
+                                            text_color_rgb = (
+                                                style_overrides.text_color_rgb
+                                            )
+                                        if (
+                                            style_overrides.outline_color_rgb
+                                            and style_overrides.outline_width
+                                        ):
+                                            outline_color = (
+                                                style_overrides.outline_color_rgb
+                                            )
+                                            outline_width_override = (
+                                                style_overrides.outline_width
+                                            )
+                                        if (
+                                            style_overrides.glow_color_rgb
+                                            and style_overrides.glow_radius
+                                            and not glow_color
+                                        ):
+                                            glow_color = (
+                                                style_overrides.glow_color_rgb
+                                            )
+                                            glow_radius = (
+                                                style_overrides.glow_radius
+                                            )
+                                        if style_overrides.max_font_size:
+                                            target_font_size = (
+                                                style_overrides.max_font_size
+                                            )
                             # No rotation/stacking for regular bubbles
                             vertical_stack = False
                             rotation_deg = 0.0
@@ -2533,7 +2616,9 @@ def translate_and_render(
                             badness_exponent=config.rendering.badness_exponent,
                             padding_pixels=padding_pixels,
                             outline_width=(
-                                osb_outline_width if is_outside_text else 0.0
+                                osb_outline_width
+                                if is_outside_text
+                                else (outline_width_override or 0.0)
                             ),
                             supersampling_factor=config.rendering.supersampling_factor,
                             detach_trailing_punctuation=(
@@ -2550,6 +2635,9 @@ def translate_and_render(
                             ),
                             glow_color=glow_color,
                             glow_radius=glow_radius,
+                            outline_color=(
+                                outline_color if not is_outside_text else None
+                            ),
                         )
                         success = False
                         if is_outside_text:

@@ -23,6 +23,7 @@ from utils.logging import log_message
 from .detection import detect_speech_bubbles
 from .image_utils import pil_to_cv2
 from .inpainting import FluxKleinInpainter, FluxKontextInpainter
+from ..text.style_extraction import extract_text_style
 
 # Cleaning parameters
 GRAYSCALE_MIDPOINT = 128  # Threshold for determining black vs white bubbles
@@ -491,6 +492,7 @@ def process_single_bubble(
                 text_color_bgr = None
                 glow_color_rgb = None
                 glow_radius = 0.0
+                lettering_style = None
                 if image_bgr is not None:
                     text_mask = cv2.bitwise_and(
                         cv2.bitwise_not(thresholded_roi), shrunk_roi_mask
@@ -561,6 +563,27 @@ def process_single_bubble(
                                     glow_color_rgb = glow_info["color"]
                                     glow_radius = glow_info["radius"]
 
+                                # Unified style probe on the same untouched
+                                # crop: measures fill/outline/glow/font size
+                                # together so they're internally consistent
+                                # (e.g. an outline is only trusted if the
+                                # measured fill is what it wraps). Wraps in
+                                # try/except so a measurement failure can
+                                # never break cleaning - it just degrades to
+                                # the sampling above.
+                                try:
+                                    lettering_style = extract_text_style(
+                                        glow_crop_bgr,
+                                        verbose=verbose,
+                                        label=str(detection_bbox),
+                                    )
+                                except Exception as style_exc:
+                                    log_message(
+                                        f"{log_prefix}Style probe failed: {style_exc}",
+                                        verbose=verbose,
+                                    )
+                                    lettering_style = None
+
                 return (
                     final_mask,
                     fill_color_bgr,
@@ -571,6 +594,7 @@ def process_single_bubble(
                     text_median_line_height,
                     glow_color_rgb,
                     glow_radius,
+                    lettering_style,
                 )
 
         raise CleaningError("Failed to process bubble mask")
@@ -718,6 +742,7 @@ def clean_speech_bubbles(
             text_median_line_height: Optional[float] = None
             glow_color_rgb: Optional[tuple[int, int, int]] = None
             glow_radius: float = 0.0
+            lettering_style: Optional[dict] = None
             base_mask = None
             is_sam_mask = False
 
@@ -736,6 +761,7 @@ def clean_speech_bubbles(
                         text_median_line_height,
                         glow_color_rgb,
                         glow_radius,
+                        lettering_style,
                     ) = process_single_bubble(
                         base_mask,
                         img_gray,
@@ -787,6 +813,7 @@ def clean_speech_bubbles(
                             text_color_bgr = retry_res.get("text_color_bgr")
                             glow_color_rgb = retry_res.get("glow_color_rgb")
                             glow_radius = retry_res.get("glow_radius", 0.0)
+                            lettering_style = retry_res.get("lettering_style")
                             retry_success = True
                             log_message(
                                 f"Otsu retry successful for {detection.get('bbox')}",
@@ -839,6 +866,7 @@ def clean_speech_bubbles(
                         text_median_line_height,
                         glow_color_rgb,
                         glow_radius,
+                        lettering_style,
                     ) = process_single_bubble(
                         base_mask,
                         img_gray,
@@ -891,6 +919,7 @@ def clean_speech_bubbles(
                             text_color_bgr = retry_res.get("text_color_bgr")
                             glow_color_rgb = retry_res.get("glow_color_rgb")
                             glow_radius = retry_res.get("glow_radius", 0.0)
+                            lettering_style = retry_res.get("lettering_style")
                             retry_success = True
                             log_message(
                                 f"Otsu retry successful for {detection.get('bbox')}",
@@ -922,6 +951,7 @@ def clean_speech_bubbles(
                         "text_median_line_height": text_median_line_height,
                         "glow_color_rgb": glow_color_rgb,
                         "glow_radius": glow_radius,
+                        "lettering_style": lettering_style,
                         "is_sam": is_sam_mask,
                         "inpainted": False,
                     }
@@ -1246,6 +1276,7 @@ def retry_cleaning_with_otsu(
         text_median_line_height,
         glow_color_rgb,
         glow_radius,
+        lettering_style,
     ) = result
 
     bubble_color = sample_color_bgr if sample_color_bgr else fill_color_bgr
@@ -1266,5 +1297,6 @@ def retry_cleaning_with_otsu(
         "text_median_line_height": text_median_line_height,
         "glow_color_rgb": glow_color_rgb,
         "glow_radius": glow_radius,
+        "lettering_style": lettering_style,
         "is_sam": bubble_info.get("is_sam", False),
     }

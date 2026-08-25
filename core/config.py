@@ -111,6 +111,11 @@ class RenderingConfig:
     badness_exponent: float = 3.0
     padding_pixels: float = 4.0
     outline_width: float = 0.0
+    # Per-instance outline colour (RGB), set by pipeline.py from a measured
+    # original style (core.text.style_extraction) when match_original_style
+    # is enabled. None = auto black/white based on text brightness, matching
+    # the pre-existing behaviour.
+    outline_color: Optional[tuple[int, int, int]] = None
     supersampling_factor: int = 4
     detach_trailing_punctuation: bool = True
     auto_vertical_text: bool = False

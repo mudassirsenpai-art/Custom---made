@@ -425,6 +425,11 @@ def render_text_skia(
         skia_glow_color = skia.Color(gr, gg, gb)
         glow_radius_px = float(config.glow_radius)
 
+    skia_outline_color = None
+    if getattr(config, "outline_color", None) is not None:
+        orr, og, ob = config.outline_color
+        skia_outline_color = skia.Color(orr, og, ob)
+
     skia_bg_color = None
     if text_background_color is not None:
         skia_bg_color = skia.Color(
@@ -542,6 +547,7 @@ def render_text_skia(
             config.font_hinting,
             config.outline_width * factor,  # Scale outline width too
             verbose,
+            outline_color=skia_outline_color,
             pre_translate_x=(
                 float(scaled_target_center_x)
                 if (rotation_deg and abs(rotation_deg) > 0.01)
@@ -610,6 +616,7 @@ def render_text_skia(
             config.font_hinting,
             config.outline_width,
             verbose,
+            outline_color=skia_outline_color,
             pre_translate_x=(
                 float(target_center_x)
                 if (rotation_deg and abs(rotation_deg) > 0.01)
