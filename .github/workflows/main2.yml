@@ -1,0 +1,46 @@
+name: Ultimate Zip Extraction Jutsu ⚔️
+
+on:
+  workflow_dispatch: # Aap isko manually GitHub Actions tab se trigger kar sakte hain
+
+permissions:
+  contents: write    # Git commit aur push karne ke liye zaroori permission
+
+jobs:
+  clean-and-extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Clean Repo, Extract, and Delete Zip 🧹
+        run: |
+          echo "Mission start! Safai abhiyan shuru..."
+          
+          # Step 1: Zip file ko temporary safe jagah move karna
+          mv Custom---made-main-wired.zip /tmp/
+          
+          # Step 2: Sab kuch delete karna (lekin .git aur .github ko bacha kar!)
+          find . -maxdepth 1 -mindepth 1 ! -name '.git' ! -name '.github' -exec rm -rf {} +
+          echo "Enemy files destroyed!"
+          
+          # Step 3: Zip ko wapas lana
+          mv /tmp/Custom---made-main-wired.zip .
+          
+          # Step 4: Zip ko extract karna
+          unzip Custom---made-main-wired.zip
+          echo "Zip extracted successfully!"
+          
+          # Step 5: Zip file ka khatma
+          rm Custom---made-main-wired.zip
+          echo "Zip file deleted. Mission accomplished!"
+
+      - name: Commit and Push Changes 🚀
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add .
+          
+          # Agar koi changes hain toh hi commit karega, warna error nahi dega
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-extracted zip and cleaned repo 🌸" && git push)
