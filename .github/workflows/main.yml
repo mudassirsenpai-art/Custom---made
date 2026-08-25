@@ -1,4 +1,4 @@
-Name: Extract and Commit
+name: Extract and Commit
 
 on:
   workflow_dispatch:
